@@ -5,19 +5,27 @@ import os
 from pathlib import Path
 from .config import settings
 
-# Создаем папку для базы данных если её нет
-if settings.DATABASE_URL.startswith("sqlite"):
-    # Для SQLite нужно убрать префикс и создать путь
-    db_path = settings.DATABASE_URL.replace("sqlite:///", "")
-    db_path_dir = Path(db_path).parent
-    if db_path_dir != Path("."):
-        db_path_dir.mkdir(parents=True, exist_ok=True)
+# Определяем URL базы данных
+if settings.DB_USE_MYSQL:
+    database_url = settings.mysql_database_url
+    connect_args = {}
+else:
+    database_url = settings.DATABASE_URL
+    # Создаем папку для базы данных если её нет
+    if database_url.startswith("sqlite"):
+        # Для SQLite нужно убрать префикс и создать путь
+        db_path = database_url.replace("sqlite:///", "")
+        db_path_dir = Path(db_path).parent
+        if db_path_dir != Path("."):
+            db_path_dir.mkdir(parents=True, exist_ok=True)
+    connect_args = {"check_same_thread": False} if "sqlite" in database_url else {}
 
 # Создаем движок базы данных
 engine = create_engine(
-    settings.DATABASE_URL,
-    connect_args={"check_same_thread": False} if "sqlite" in settings.DATABASE_URL else {},
-    echo=False
+    database_url,
+    connect_args=connect_args,
+    echo=False,
+    pool_pre_ping=True if settings.DB_USE_MYSQL else False  # Для MySQL проверка соединения
 )
 
 # Создаем фабрику сессий
