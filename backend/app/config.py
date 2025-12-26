@@ -27,6 +27,16 @@ class Settings(BaseSettings):
     # CORS
     CORS_ORIGINS: str = "http://localhost:3000,http://localhost:5000"
     
+    # Tavily Search API
+    TAVILY_API_KEY: str = ""
+    TAVILY_SEARCH_DEPTH: str = "basic"  # "basic" or "advanced"
+    TAVILY_MAX_RESULTS: int = 5
+    TAVILY_SEARCH_TIMEOUT: int = 10  # seconds
+    
+    # Ollama Configuration
+    OLLAMA_URL: str = "http://192.168.10.12:11434"
+    OLLAMA_DEFAULT_MODEL: str = "gpt-oss:20b"
+    
     class Config:
         env_file = ".env"
         case_sensitive = True

@@ -6,7 +6,7 @@ from pathlib import Path
 import os
 from .config import settings
 from .database import init_db
-from .routes import auth, chats, admin
+from .routes import auth, chats, admin, search_chat
 from .models.user import User
 from .database import get_db, SessionLocal
 
@@ -29,6 +29,7 @@ app.add_middleware(
 app.include_router(auth.router)
 app.include_router(chats.router)
 app.include_router(admin.router)
+app.include_router(search_chat.router)
 
 
 @app.on_event("startup")
