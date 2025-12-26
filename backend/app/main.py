@@ -37,13 +37,6 @@ async def startup_event():
     # Инициализация базы данных
     init_db()
     
-    # Попытка миграции данных из старой БД
-    try:
-        from .utils.database_migration import run_migration
-        run_migration()
-    except Exception as e:
-        print(f"⚠️ Миграция данных не выполнена: {e}")
-    
     # Назначаем пользователя vlad0o0s администратором при запуске сервера
     db = SessionLocal()
     try:
