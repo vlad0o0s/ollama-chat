@@ -16,6 +16,8 @@ from ..schemas.search import SearchRequest, SearchMetadata
 from ..schemas.message import MessageCreate
 from ..auth.dependencies import get_current_user
 from ..services.search_service import search_service
+from ..services.resource_manager import resource_manager
+from ..services.service_types import ServiceType
 from ..config import settings
 import logging
 
@@ -137,101 +139,132 @@ async def chat_with_search(
     async def generate_response():
         assistant_content = ""
         
+        # Оцениваем требуемую VRAM для Ollama (обычно 2-4GB)
+        estimated_vram_mb = 3072  # 3GB для безопасности
+        
+        # Получаем блокировку GPU через Resource Manager
         try:
-            # Отправляем запрос в Ollama
-            async with httpx.AsyncClient(timeout=300.0) as client:
-                ollama_url = f"{settings.OLLAMA_URL}/api/chat"
+            async with await resource_manager.acquire_gpu(
+                service_type=ServiceType.OLLAMA,
+                user_id=current_user.id,
+                required_vram_mb=estimated_vram_mb,
+                timeout=300
+            ) as gpu_lock:
+                logger.info(f"🔒 GPU заблокирован для Ollama (чат, ID: {gpu_lock.lock_id[:8]})")
                 
-                payload = {
-                    "model": settings.OLLAMA_DEFAULT_MODEL,
-                    "messages": messages_for_llm,
-                    "stream": True
-                }
-                
-                async with client.stream(
-                    "POST",
-                    ollama_url,
-                    json=payload,
-                    headers={"Content-Type": "application/json"},
-                    timeout=300.0
-                ) as response:
-                    if response.status_code != 200:
-                        try:
-                            error_text = await response.aread()
-                            error_msg = error_text.decode() if error_text else "Unknown error"
-                        except:
-                            error_msg = f"HTTP {response.status_code}"
-                        logger.error(f"Ошибка Ollama: {error_msg}")
-                        error_data = {
-                            "error": f"Ошибка Ollama: {error_msg}",
-                            "done": True
-                        }
-                        yield f"data: {json.dumps(error_data, ensure_ascii=False)}\n\n"
-                        return
-                    
-                    async for line in response.aiter_lines():
-                        if not line.strip():
-                            continue
+                try:
+                    # Отправляем запрос в Ollama
+                    async with httpx.AsyncClient(timeout=300.0) as client:
+                        ollama_url = f"{settings.OLLAMA_URL}/api/chat"
                         
-                        try:
-                            data = json.loads(line)
-                            
-                            if "message" in data and "content" in data["message"]:
-                                content = data["message"]["content"]
-                                assistant_content += content
-                                
-                                # Отправляем чанк клиенту в формате SSE
-                                chunk_data = {
-                                    "content": content,
-                                    "done": False
+                        payload = {
+                            "model": settings.OLLAMA_DEFAULT_MODEL,
+                            "messages": messages_for_llm,
+                            "stream": True
+                        }
+                        
+                        async with client.stream(
+                            "POST",
+                            ollama_url,
+                            json=payload,
+                            headers={"Content-Type": "application/json"},
+                            timeout=300.0
+                        ) as response:
+                            if response.status_code != 200:
+                                try:
+                                    error_text = await response.aread()
+                                    error_msg = error_text.decode() if error_text else "Unknown error"
+                                except:
+                                    error_msg = f"HTTP {response.status_code}"
+                                logger.error(f"Ошибка Ollama: {error_msg}")
+                                error_data = {
+                                    "error": f"Ошибка Ollama: {error_msg}",
+                                    "done": True
                                 }
-                                yield f"data: {json.dumps(chunk_data, ensure_ascii=False)}\n\n"
+                                yield f"data: {json.dumps(error_data, ensure_ascii=False)}\n\n"
+                                return
                             
-                            if data.get("done", False):
-                                # Отправляем финальный чанк с метаданными
-                                final_data = {
-                                    "content": "",
-                                    "done": True,
-                                    "search_metadata": search_metadata.dict() if search_metadata else None
-                                }
-                                yield f"data: {json.dumps(final_data, ensure_ascii=False)}\n\n"
-                                break
+                            async for line in response.aiter_lines():
+                                if not line.strip():
+                                    continue
                                 
-                        except json.JSONDecodeError:
-                            continue
-                        except Exception as e:
-                            error_data = {
-                                "error": str(e),
-                                "done": True
-                            }
-                            yield f"data: {json.dumps(error_data, ensure_ascii=False)}\n\n"
-                            break
-            
-            # Сохраняем ответ ассистента в БД (синхронная операция в отдельном потоке)
-            if assistant_content:
-                def save_message():
-                    db_session = SessionLocal()
-                    try:
-                        assistant_message = Message(
-                            chat_id=request.chat_id,
-                            role="assistant",
-                            content=assistant_content
-                        )
-                        db_session.add(assistant_message)
-                        db_session.commit()
-                    finally:
-                        db_session.close()
-                
-                # Выполняем сохранение в отдельном потоке
-                loop = asyncio.get_event_loop()
-                await loop.run_in_executor(None, save_message)
-                
-        except Exception as e:
+                                try:
+                                    data = json.loads(line)
+                                    
+                                    if "message" in data and "content" in data["message"]:
+                                        content = data["message"]["content"]
+                                        assistant_content += content
+                                        
+                                        # Отправляем чанк клиенту в формате SSE
+                                        chunk_data = {
+                                            "content": content,
+                                            "done": False
+                                        }
+                                        yield f"data: {json.dumps(chunk_data, ensure_ascii=False)}\n\n"
+                                    
+                                    if data.get("done", False):
+                                        # Отправляем финальный чанк с метаданными
+                                        final_data = {
+                                            "content": "",
+                                            "done": True,
+                                            "search_metadata": search_metadata.dict() if search_metadata else None
+                                        }
+                                        yield f"data: {json.dumps(final_data, ensure_ascii=False)}\n\n"
+                                        break
+                                        
+                                except json.JSONDecodeError:
+                                    continue
+                                except Exception as e:
+                                    error_data = {
+                                        "error": str(e),
+                                        "done": True
+                                    }
+                                    yield f"data: {json.dumps(error_data, ensure_ascii=False)}\n\n"
+                                    break
+                                    
+                except Exception as e:
+                    logger.error(f"❌ Ошибка при работе с Ollama: {e}")
+                    error_data = {
+                        "error": f"Ошибка при генерации ответа: {str(e)}",
+                        "done": True
+                    }
+                    yield f"data: {json.dumps(error_data, ensure_ascii=False)}\n\n"
+                    
+        except TimeoutError as e:
+            logger.error(f"❌ Таймаут ожидания GPU для Ollama (чат): {e}")
             error_data = {
-                "error": f"Ошибка генерации ответа: {str(e)}",
+                "error": f"Таймаут ожидания GPU: {str(e)}",
                 "done": True
             }
             yield f"data: {json.dumps(error_data, ensure_ascii=False)}\n\n"
+            return
+        except Exception as e:
+            logger.error(f"❌ Ошибка при работе с Resource Manager: {e}")
+            error_data = {
+                "error": f"Ошибка управления ресурсами: {str(e)}",
+                "done": True
+            }
+            yield f"data: {json.dumps(error_data, ensure_ascii=False)}\n\n"
+            return
+        
+        # Сохраняем ответ ассистента в БД (синхронная операция в отдельном потоке)
+        if assistant_content:
+            def save_message():
+                db_session = SessionLocal()
+                try:
+                    assistant_message = Message(
+                        chat_id=request.chat_id,
+                        role="assistant",
+                        content=assistant_content
+                    )
+                    db_session.add(assistant_message)
+                    db_session.commit()
+                finally:
+                    db_session.close()
+            
+            # Выполняем сохранение в отдельном потоке
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, save_message)
     
     return StreamingResponse(
         generate_response(),

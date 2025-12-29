@@ -38,9 +38,17 @@ export const AuthProvider = ({ children }) => {
             setToken(null);
           }
         } catch (error) {
-          console.error('Ошибка проверки токена:', error);
-          localStorage.removeItem('token');
-          setToken(null);
+          // Игнорируем ошибки подключения при первой загрузке (backend может еще запускаться)
+          if (error.message && error.message.includes('ECONNREFUSED')) {
+            console.warn('Backend недоступен, возможно еще запускается. Повторите попытку через несколько секунд.');
+          } else {
+            console.error('Ошибка проверки токена:', error);
+          }
+          // Не удаляем токен при ошибке подключения, только при ошибке авторизации
+          if (error.message && !error.message.includes('ECONNREFUSED')) {
+            localStorage.removeItem('token');
+            setToken(null);
+          }
         }
       }
       setLoading(false);

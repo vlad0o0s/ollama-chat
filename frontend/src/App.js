@@ -27,7 +27,10 @@ import {
   RiFileCopyLine,
   RiCheckLine,
   RiImageLine,
-  RiImageAddLine
+  RiImageAddLine,
+  RiDownloadLine,
+  RiArrowDownSLine,
+  RiArrowUpSLine
 } from 'react-icons/ri';
 
 function App() {
@@ -55,7 +58,10 @@ function App() {
   const [useWebSearch, setUseWebSearch] = useState(false); // Выключен по умолчанию
   const [isSearching, setIsSearching] = useState(false);
   const [searchSources, setSearchSources] = useState([]);
-  const [isGeneratingImage, setIsGeneratingImage] = useState(false);
+  const [isImageMode, setIsImageMode] = useState(false); // Переключатель режима изображения
+  const [imageAspectRatio, setImageAspectRatio] = useState('1:1'); // Соотношение сторон изображения
+  const [imageGenerationStatus, setImageGenerationStatus] = useState(null); // Статус генерации изображения
+  const [lightboxImage, setLightboxImage] = useState(null); // Изображение для лайтбокса
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [showSettings, setShowSettings] = useState(false);
   const [showAuth, setShowAuth] = useState(false);
@@ -75,6 +81,25 @@ function App() {
   };
 
   // Функция копирования текста в буфер обмена с поддержкой HTML
+  const downloadImage = async (imageUrl, filename) => {
+    try {
+      const response = await fetch(imageUrl);
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename || 'image.png';
+      document.body.appendChild(a);
+      a.click();
+      window.URL.revokeObjectURL(url);
+      document.body.removeChild(a);
+    } catch (err) {
+      console.error('Ошибка скачивания изображения:', err);
+      // Fallback - открываем в новой вкладке
+      window.open(imageUrl, '_blank');
+    }
+  };
+
   const copyToClipboard = async (text, messageIndex) => {
     try {
       // Проверяем, поддерживает ли браузер Clipboard API
@@ -150,6 +175,26 @@ function App() {
   useEffect(() => {
     scrollToBottom();
   }, [messages]);
+
+  // Обработка ESC для закрытия лайтбокса
+  useEffect(() => {
+    const handleEscape = (e) => {
+      if (e.key === 'Escape' && lightboxImage) {
+        setLightboxImage(null);
+      }
+    };
+    
+    if (lightboxImage) {
+      document.addEventListener('keydown', handleEscape);
+      // Блокируем скролл страницы при открытом лайтбоксе
+      document.body.style.overflow = 'hidden';
+    }
+    
+    return () => {
+      document.removeEventListener('keydown', handleEscape);
+      document.body.style.overflow = '';
+    };
+  }, [lightboxImage]);
 
   // Функция для генерации возможных IP адресов
   const generatePossibleUrls = () => {
@@ -400,6 +445,12 @@ function App() {
 
   const sendMessage = async (retryCount = 0) => {
     if (!inputMessage.trim() || isLoading) return;
+    
+    // Если включен режим изображения, используем генерацию изображения
+    if (isImageMode) {
+      await generateImage();
+      return;
+    }
 
     // Проверяем соединение с Ollama перед отправкой
     const isConnected = await checkOllamaConnection();
@@ -567,19 +618,19 @@ function App() {
       } else {
         // Используем прямой запрос к Ollama (старый способ)
         response = await fetch(`${ollamaUrl}/api/chat`, {
-          method: 'POST',
-          mode: 'cors',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            model: model,
-            messages: newMessages,
-            stream: true
-          }),
-          signal: controller.signal,
+        method: 'POST',
+        mode: 'cors',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: model,
+          messages: newMessages,
+          stream: true
+        }),
+        signal: controller.signal,
           timeout: 300000
-        });
+      });
       }
 
       const endTime = Date.now();
@@ -874,18 +925,72 @@ function App() {
   };
 
   const generateImage = async () => {
-    if (!inputMessage.trim() || isGeneratingImage || isLoading) return;
+    if (!inputMessage.trim() || isLoading) return;
     
     if (!currentChatId) {
       alert('Пожалуйста, выберите или создайте чат перед генерацией изображения');
       return;
     }
 
-    setIsGeneratingImage(true);
+    setIsLoading(true);
+    
+    // Вычисляем размеры изображения на основе выбранного соотношения сторон
+    const getImageDimensions = (aspectRatio) => {
+      const baseSize = 1024; // Базовый размер
+      switch (aspectRatio) {
+        case '9:16': // Вертикальное
+          return { width: 576, height: 1024 };
+        case '16:9': // Горизонтальное
+          return { width: 1024, height: 576 };
+        case '1:1': // Квадратное
+          return { width: 1024, height: 1024 };
+        case '3:4': // Портретное
+          return { width: 768, height: 1024 };
+        case '4:3': // Альбомное
+          return { width: 1024, height: 768 };
+        default:
+          return { width: 1024, height: 1024 };
+      }
+    };
+
+    const dimensions = getImageDimensions(imageAspectRatio);
+    
+    // Добавляем временное сообщение для отображения плейсхолдера
+    const tempMessage = { 
+      role: 'assistant', 
+      content: '',
+      message_type: 'image_generating',
+      status: 'generating',
+      aspect_ratio: imageAspectRatio,
+      width: dimensions.width,
+      height: dimensions.height
+    };
+    setMessages(prev => [...prev, tempMessage]);
     
     try {
       const token = localStorage.getItem('token');
-      const response = await fetch('/api/image/generate', {
+      // Вычисляем размеры изображения на основе выбранного соотношения сторон
+      const getImageDimensions = (aspectRatio) => {
+        const baseSize = 1024; // Базовый размер
+        switch (aspectRatio) {
+          case '9:16': // Вертикальное
+            return { width: 576, height: 1024 };
+          case '16:9': // Горизонтальное
+            return { width: 1024, height: 576 };
+          case '1:1': // Квадратное
+            return { width: 1024, height: 1024 };
+          case '3:4': // Портретное
+            return { width: 768, height: 1024 };
+          case '4:3': // Альбомное
+            return { width: 1024, height: 768 };
+          default:
+            return { width: 1024, height: 1024 };
+        }
+      };
+
+      const dimensions = getImageDimensions(imageAspectRatio);
+
+      const response = await fetch('/api/image/generate/stream', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -893,33 +998,105 @@ function App() {
         },
         body: JSON.stringify({
           chat_id: currentChatId,
-          description: inputMessage.trim()
+          description: inputMessage.trim(),
+          width: dimensions.width,
+          height: dimensions.height
         })
       });
 
       if (!response.ok) {
-        const errorData = await response.json().catch(() => ({ detail: 'Ошибка генерации изображения' }));
-        throw new Error(errorData.detail || `HTTP error! status: ${response.status}`);
+        throw new Error(`HTTP error! status: ${response.status}`);
       }
 
-      const result = await response.json();
-      
-      // Очищаем поле ввода
-      setInputMessage('');
-      
-      // Перезагружаем сообщения чата для отображения нового изображения
-      await loadChatMessages(currentChatId);
-      
-      // Прокручиваем вниз
-      setTimeout(() => {
-        scrollToBottom();
-      }, 100);
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            try {
+              const data = JSON.parse(line.slice(6));
+              
+              if (data.error) {
+                setImageGenerationStatus({ stage: 'error', message: data.error });
+                setMessages(prev => {
+                  const updated = [...prev];
+                  const lastIndex = updated.length - 1;
+                  if (updated[lastIndex]?.message_type === 'image_generating') {
+                    updated[lastIndex] = {
+                      role: 'assistant',
+                      content: `Ошибка: ${data.error}`,
+                      message_type: 'text'
+                    };
+                  }
+                  return updated;
+                });
+                break;
+              }
+              
+              if (data.stage) {
+                setImageGenerationStatus({ stage: data.stage, message: data.message });
+                // Обновляем статус, но не меняем отображение (плейсхолдер остается)
+                setMessages(prev => {
+                  const updated = [...prev];
+                  const lastIndex = updated.length - 1;
+                  if (updated[lastIndex]?.message_type === 'image_generating') {
+                    updated[lastIndex] = {
+                      ...updated[lastIndex],
+                      status: data.stage
+                    };
+                  }
+                  return updated;
+                });
+              }
+              
+              if (data.done && data.success) {
+                // Очищаем поле ввода
+                setInputMessage('');
+                
+                // Перезагружаем сообщения чата для отображения нового изображения
+                await loadChatMessages(currentChatId);
+                
+                // Прокручиваем вниз
+                setTimeout(() => {
+                  scrollToBottom();
+                }, 100);
+                
+                setImageGenerationStatus(null);
+              }
+            } catch (e) {
+              console.error('Ошибка парсинга SSE данных:', e);
+            }
+          }
+        }
+      }
       
     } catch (error) {
       console.error('Ошибка генерации изображения:', error);
-      alert(`Ошибка генерации изображения: ${error.message}`);
+      setImageGenerationStatus({ stage: 'error', message: error.message });
+      setMessages(prev => {
+        const updated = [...prev];
+        const lastIndex = updated.length - 1;
+        if (updated[lastIndex]?.message_type === 'image_generating') {
+          updated[lastIndex] = {
+            role: 'assistant',
+            content: `Ошибка генерации изображения: ${error.message}`,
+            message_type: 'text'
+          };
+        }
+        return updated;
+      });
     } finally {
-      setIsGeneratingImage(false);
+      setIsLoading(false);
+      setImageGenerationStatus(null);
     }
   };
 
@@ -1146,6 +1323,28 @@ function App() {
                       )}
                     </span>
                   </div>
+                ) : message.message_type === 'image_generating' ? (
+                  <div className="message-content image-message">
+                    <div className="image-preview-container">
+                      <div 
+                        className="image-generating-placeholder"
+                        style={{
+                          aspectRatio: message.aspect_ratio ? message.aspect_ratio.replace(':', '/') : '1/1',
+                          maxWidth: message.width ? `${Math.min(message.width, 1024)}px` : '1024px',
+                          maxHeight: message.height ? `${Math.min(message.height, 1024)}px` : '1024px'
+                        }}
+                      >
+                        <div className="generating-image-blur">
+                          <div className="generating-noise"></div>
+                        </div>
+                        {message.status === 'error' && (
+                          <div className="generating-error-overlay">
+                            <div className="generating-error-text">Ошибка генерации</div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
                 ) : message.message_type === 'image' && message.image_url ? (
                   <div className="message-content image-message">
                     <div className="image-preview-container">
@@ -1154,11 +1353,27 @@ function App() {
                         alt={message.content || "Сгенерированное изображение"}
                         className="generated-image"
                         loading="lazy"
+                        onClick={() => setLightboxImage(message.image_url)}
                       />
+                      <div className="image-actions">
+                        <button
+                          className="image-action-button download-image-button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            downloadImage(message.image_url, message.image_metadata?.filename || 'image.png');
+                          }}
+                          title="Скачать изображение"
+                        >
+                          <RiDownloadLine className="action-icon" />
+                        </button>
+                      </div>
                       {message.image_metadata && (
                         <div className="image-metadata">
                           <details className="image-prompt-details">
-                            <summary>Промпты</summary>
+                            <summary>
+                              <span>Промпты</span>
+                              <RiArrowDownSLine className="details-icon" />
+                            </summary>
                             <div className="prompt-info">
                               <div className="prompt-section">
                                 <strong>Positive:</strong>
@@ -1249,6 +1464,49 @@ function App() {
           <div ref={messagesEndRef} />
         </div>
 
+        {isImageMode && (
+          <div className="aspect-ratio-selector">
+            <span className="aspect-ratio-label">Соотношение сторон:</span>
+            <div className="aspect-ratio-buttons">
+              <button
+                onClick={() => setImageAspectRatio('9:16')}
+                className={`aspect-ratio-button ${imageAspectRatio === '9:16' ? 'active' : ''}`}
+                title="Вертикальное (9:16)"
+              >
+                9:16
+              </button>
+              <button
+                onClick={() => setImageAspectRatio('16:9')}
+                className={`aspect-ratio-button ${imageAspectRatio === '16:9' ? 'active' : ''}`}
+                title="Горизонтальное (16:9)"
+              >
+                16:9
+              </button>
+              <button
+                onClick={() => setImageAspectRatio('1:1')}
+                className={`aspect-ratio-button ${imageAspectRatio === '1:1' ? 'active' : ''}`}
+                title="Квадратное (1:1)"
+              >
+                1:1
+              </button>
+              <button
+                onClick={() => setImageAspectRatio('3:4')}
+                className={`aspect-ratio-button ${imageAspectRatio === '3:4' ? 'active' : ''}`}
+                title="Портретное (3:4)"
+              >
+                3:4
+              </button>
+              <button
+                onClick={() => setImageAspectRatio('4:3')}
+                className={`aspect-ratio-button ${imageAspectRatio === '4:3' ? 'active' : ''}`}
+                title="Альбомное (4:3)"
+              >
+                4:3
+              </button>
+            </div>
+          </div>
+        )}
+
         <div className="input-container">
           <textarea
             ref={inputRef}
@@ -1262,7 +1520,7 @@ function App() {
           />
           <button
             onClick={() => setUseWebSearch(!useWebSearch)}
-            disabled={isLoading || isGeneratingImage}
+            disabled={isLoading || isImageMode}
             className={`search-toggle-button ${useWebSearch ? 'active' : ''}`}
             title="Поиск в интернете"
           >
@@ -1273,16 +1531,12 @@ function App() {
             )}
           </button>
           <button
-            onClick={generateImage}
-            disabled={isLoading || isGeneratingImage || !inputMessage.trim()}
-            className={`image-generate-button ${isGeneratingImage ? 'active' : ''}`}
-            title="Генерировать изображение"
+            onClick={() => setIsImageMode(!isImageMode)}
+            disabled={isLoading || useWebSearch}
+            className={`image-toggle-button ${isImageMode ? 'active' : ''}`}
+            title={isImageMode ? "Режим генерации изображения (выкл)" : "Режим генерации изображения (вкл)"}
           >
-            {isGeneratingImage ? (
-              <RiLoader4Line className="spin" style={{fontSize: '18px'}} />
-            ) : (
-              <RiImageAddLine style={{fontSize: '18px'}} />
-            )}
+            <RiImageLine style={{fontSize: '18px'}} />
           </button>
           <button 
             onClick={isLoading ? stopGeneration : sendMessage} 
@@ -1297,6 +1551,32 @@ function App() {
           </button>
         </div>
       </div>
+      
+      {/* Лайтбокс для просмотра изображений */}
+      {lightboxImage && (
+        <div 
+          className="lightbox-overlay"
+          onClick={() => setLightboxImage(null)}
+        >
+          <div 
+            className="lightbox-content"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              className="lightbox-close"
+              onClick={() => setLightboxImage(null)}
+              title="Закрыть"
+            >
+              <RiCloseLine className="lightbox-close-icon" />
+            </button>
+            <img 
+              src={lightboxImage} 
+              alt="Просмотр изображения"
+              className="lightbox-image"
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 }
