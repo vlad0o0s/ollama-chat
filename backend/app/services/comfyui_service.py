@@ -5,8 +5,12 @@ import httpx
 import json
 import asyncio
 import logging
+import os
+from pathlib import Path
 from typing import Dict, Optional, Tuple
 from ..config import settings
+from .resource_manager import resource_manager
+from .service_types import ServiceType
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +24,8 @@ class ComfyUIService:
         self.model = settings.COMFYUI_MODEL
         self.timeout = settings.COMFYUI_TIMEOUT
         self.retry_attempts = settings.COMFYUI_RETRY_ATTEMPTS
+        self.workflow_path = settings.COMFYUI_WORKFLOW_PATH
+        self.workflow_template = self._load_workflow_template()
         
     def _detect_comfyui_url(self) -> str:
         """
@@ -52,6 +58,40 @@ class ComfyUIService:
         # Возвращаем URL из настроек даже если проверка не удалась
         return comfyui_url
     
+    def _load_workflow_template(self) -> Optional[Dict]:
+        """
+        Загружает шаблон workflow из JSON файла
+        
+        Returns:
+            Словарь с workflow или None если файл не найден
+        """
+        if not self.workflow_path:
+            logger.warning("⚠️ COMFYUI_WORKFLOW_PATH не установлен, будет использован программный workflow")
+            return None
+        
+        workflow_file = Path(self.workflow_path)
+        if not workflow_file.exists():
+            logger.warning(f"⚠️ Файл workflow не найден: {self.workflow_path}, будет использован программный workflow")
+            return None
+        
+        try:
+            with open(workflow_file, 'r', encoding='utf-8') as f:
+                workflow_data = json.load(f)
+                logger.info(f"✅ Workflow шаблон загружен из {self.workflow_path}")
+                
+                # ComfyUI экспортирует workflow в формате API, где есть поле "prompt"
+                if "prompt" in workflow_data:
+                    return workflow_data["prompt"]
+                elif isinstance(workflow_data, dict) and any(isinstance(v, dict) for v in workflow_data.values()):
+                    # Если это уже формат prompt (словарь с нодами)
+                    return workflow_data
+                else:
+                    logger.warning("⚠️ Неизвестный формат workflow, будет использован программный workflow")
+                    return None
+        except Exception as e:
+            logger.error(f"❌ Ошибка загрузки workflow шаблона: {e}")
+            return None
+    
     async def check_connection(self) -> bool:
         """Проверяет доступность ComfyUI сервера"""
         try:
@@ -64,13 +104,112 @@ class ComfyUIService:
     
     def create_workflow(self, prompt: str, negative_prompt: str, width: int = 1024, height: int = 1024) -> Dict:
         """
-        Создает workflow JSON для ComfyUI с моделью flux1-dev-fp8
+        Создает workflow JSON для ComfyUI, используя шаблон или программное создание
         
         Args:
             prompt: Положительный промпт на английском
             negative_prompt: Негативный промпт на английском
             width: Ширина изображения (по умолчанию 1024)
             height: Высота изображения (по умолчанию 1024)
+            
+        Returns:
+            Словарь с workflow для ComfyUI
+        """
+        # Если есть шаблон, используем его
+        if self.workflow_template:
+            return self._create_workflow_from_template(prompt, negative_prompt, width, height)
+        else:
+            # Fallback на программное создание
+            return self._create_workflow_programmatic(prompt, negative_prompt, width, height)
+    
+    def _create_workflow_from_template(self, prompt: str, negative_prompt: str, width: int, height: int) -> Dict:
+        """
+        Создает workflow из шаблона, обновляя промпты и размеры
+        
+        Args:
+            prompt: Положительный промпт
+            negative_prompt: Негативный промпт
+            width: Ширина изображения
+            height: Высота изображения
+            
+        Returns:
+            Обновленный workflow
+        """
+        import copy
+        workflow = copy.deepcopy(self.workflow_template)
+        
+        # Ищем ноды CLIPTextEncode для обновления промптов
+        positive_node = None
+        negative_node = None
+        
+        for node_id, node_data in workflow.items():
+            if isinstance(node_data, dict) and node_data.get("class_type") == "CLIPTextEncode":
+                inputs = node_data.get("inputs", {})
+                text = inputs.get("text", "")
+                
+                # Определяем положительный или негативный промпт по содержимому или позиции
+                # Обычно негативный промпт содержит слова типа "negative", "bad", "blurry"
+                if not positive_node:
+                    # Первая найденная нода - обычно положительная
+                    positive_node = node_id
+                elif not negative_node:
+                    # Вторая найденная нода - обычно негативная
+                    negative_node = node_id
+                    # Проверяем содержимое для уверенности
+                    if any(word in text.lower() for word in ["negative", "bad", "blurry", "low quality"]):
+                        # Меняем местами
+                        positive_node, negative_node = negative_node, positive_node
+        
+        # Если не нашли две ноды, используем первую для positive, вторую для negative
+        if not negative_node:
+            nodes = [node_id for node_id, node_data in workflow.items() 
+                    if isinstance(node_data, dict) and node_data.get("class_type") == "CLIPTextEncode"]
+            if len(nodes) >= 2:
+                positive_node = nodes[0]
+                negative_node = nodes[1]
+            elif len(nodes) == 1:
+                positive_node = nodes[0]
+                logger.warning("⚠️ Найдена только одна CLIPTextEncode нода, используем её для positive промпта")
+        
+        # Обновляем промпты
+        if positive_node:
+            workflow[positive_node]["inputs"]["text"] = prompt
+            logger.debug(f"✅ Обновлен positive промпт в ноде {positive_node[:8]}")
+        
+        if negative_node:
+            workflow[negative_node]["inputs"]["text"] = negative_prompt
+            logger.debug(f"✅ Обновлен negative промпт в ноде {negative_node[:8]}")
+        elif positive_node:
+            logger.warning("⚠️ Не найдена нода для negative промпта")
+        
+        # Ищем ноду EmptyLatentImage для обновления размеров
+        for node_id, node_data in workflow.items():
+            if isinstance(node_data, dict) and node_data.get("class_type") == "EmptyLatentImage":
+                node_data["inputs"]["width"] = width
+                node_data["inputs"]["height"] = height
+                logger.debug(f"✅ Обновлены размеры в ноде {node_id[:8]}: {width}x{height}")
+                break
+        
+        # Обновляем seed в KSampler (если есть)
+        for node_id, node_data in workflow.items():
+            if isinstance(node_data, dict) and node_data.get("class_type") == "KSampler":
+                if "seed" in node_data.get("inputs", {}):
+                    # Устанавливаем seed в 0 для случайной генерации
+                    node_data["inputs"]["seed"] = 0
+                    logger.debug(f"✅ Обновлен seed в ноде {node_id[:8]}")
+                break
+        
+        return workflow
+    
+    def _create_workflow_programmatic(self, prompt: str, negative_prompt: str, width: int, height: int) -> Dict:
+        """
+        Создает workflow программно (fallback метод)
+        
+        Args:
+            prompt: Положительный промпт на английском
+            negative_prompt: Негативный промпт на английском
+            width: Ширина изображения
+            height: Высота изображения
             
         Returns:
             Словарь с workflow для ComfyUI
@@ -259,16 +398,18 @@ class ComfyUIService:
         prompt: str, 
         negative_prompt: str, 
         width: int = 1024, 
-        height: int = 1024
+        height: int = 1024,
+        user_id: Optional[int] = None
     ) -> Dict:
         """
-        Полный цикл генерации изображения
+        Полный цикл генерации изображения с управлением ресурсами GPU
         
         Args:
             prompt: Положительный промпт
             negative_prompt: Негативный промпт
             width: Ширина изображения
             height: Высота изображения
+            user_id: ID пользователя (для приоритизации)
             
         Returns:
             Словарь с результатом:
@@ -290,39 +431,72 @@ class ComfyUIService:
                 "error": "ComfyUI сервер недоступен"
             }
         
-        # Создаем workflow
-        workflow = self.create_workflow(prompt, negative_prompt, width, height)
+        # Оцениваем требуемую VRAM (примерно 4-6GB для flux1-dev-fp8)
+        # Уменьшаем требования, так как процесс будет переключен перед использованием
+        estimated_vram_mb = 4096  # 4GB - после переключения процессов VRAM будет свободна
         
-        # Добавляем в очередь
-        prompt_id = await self.queue_prompt(workflow)
-        if not prompt_id:
+        # Получаем блокировку GPU через Resource Manager
+        try:
+            async with await resource_manager.acquire_gpu(
+                service_type=ServiceType.COMFYUI,
+                user_id=user_id,
+                required_vram_mb=estimated_vram_mb,
+                timeout=self.timeout
+            ) as gpu_lock:
+                logger.info(f"🔒 GPU заблокирован для ComfyUI (ID: {gpu_lock.lock_id[:8]})")
+                
+                # Создаем workflow
+                workflow = self.create_workflow(prompt, negative_prompt, width, height)
+                
+                # Добавляем в очередь ComfyUI
+                prompt_id = await self.queue_prompt(workflow)
+                if not prompt_id:
+                    return {
+                        "success": False,
+                        "image": None,
+                        "filename": None,
+                        "prompt_id": None,
+                        "error": "Не удалось добавить workflow в очередь ComfyUI"
+                    }
+                
+                # Получаем изображение
+                result = await self.get_image(prompt_id)
+                
+                if result:
+                    image_bytes, filename = result
+                    return {
+                        "success": True,
+                        "image": image_bytes,
+                        "filename": filename,
+                        "prompt_id": prompt_id,
+                        "error": None
+                    }
+                else:
+                    return {
+                        "success": False,
+                        "image": None,
+                        "filename": None,
+                        "prompt_id": prompt_id,
+                        "error": "Таймаут ожидания генерации изображения"
+                    }
+                    
+        except TimeoutError as e:
+            logger.error(f"❌ Таймаут ожидания GPU для ComfyUI: {e}")
             return {
                 "success": False,
                 "image": None,
                 "filename": None,
                 "prompt_id": None,
-                "error": "Не удалось добавить workflow в очередь"
+                "error": f"Таймаут ожидания GPU: {str(e)}"
             }
-        
-        # Получаем изображение
-        result = await self.get_image(prompt_id)
-        
-        if result:
-            image_bytes, filename = result
-            return {
-                "success": True,
-                "image": image_bytes,
-                "filename": filename,
-                "prompt_id": prompt_id,
-                "error": None
-            }
-        else:
+        except Exception as e:
+            logger.error(f"❌ Ошибка при работе с Resource Manager: {e}")
             return {
                 "success": False,
                 "image": None,
                 "filename": None,
-                "prompt_id": prompt_id,
-                "error": "Таймаут ожидания генерации изображения"
+                "prompt_id": None,
+                "error": f"Ошибка управления ресурсами: {str(e)}"
             }
 
 

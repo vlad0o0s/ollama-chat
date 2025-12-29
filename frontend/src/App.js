@@ -55,7 +55,8 @@ function App() {
   const [useWebSearch, setUseWebSearch] = useState(false); // Выключен по умолчанию
   const [isSearching, setIsSearching] = useState(false);
   const [searchSources, setSearchSources] = useState([]);
-  const [isGeneratingImage, setIsGeneratingImage] = useState(false);
+  const [isImageMode, setIsImageMode] = useState(false); // Переключатель режима изображения
+  const [imageGenerationStatus, setImageGenerationStatus] = useState(null); // Статус генерации изображения
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [showSettings, setShowSettings] = useState(false);
   const [showAuth, setShowAuth] = useState(false);
@@ -400,6 +401,12 @@ function App() {
 
   const sendMessage = async (retryCount = 0) => {
     if (!inputMessage.trim() || isLoading) return;
+    
+    // Если включен режим изображения, используем генерацию изображения
+    if (isImageMode) {
+      await generateImage();
+      return;
+    }
 
     // Проверяем соединение с Ollama перед отправкой
     const isConnected = await checkOllamaConnection();
@@ -567,19 +574,19 @@ function App() {
       } else {
         // Используем прямой запрос к Ollama (старый способ)
         response = await fetch(`${ollamaUrl}/api/chat`, {
-          method: 'POST',
-          mode: 'cors',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            model: model,
-            messages: newMessages,
-            stream: true
-          }),
-          signal: controller.signal,
+        method: 'POST',
+        mode: 'cors',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: model,
+          messages: newMessages,
+          stream: true
+        }),
+        signal: controller.signal,
           timeout: 300000
-        });
+      });
       }
 
       const endTime = Date.now();
@@ -874,18 +881,28 @@ function App() {
   };
 
   const generateImage = async () => {
-    if (!inputMessage.trim() || isGeneratingImage || isLoading) return;
+    if (!inputMessage.trim() || isLoading) return;
     
     if (!currentChatId) {
       alert('Пожалуйста, выберите или создайте чат перед генерацией изображения');
       return;
     }
 
-    setIsGeneratingImage(true);
+    setIsLoading(true);
+    setImageGenerationStatus({ stage: 'starting', message: 'Начало генерации...' });
+    
+    // Добавляем временное сообщение для отображения прогресса
+    const tempMessage = { 
+      role: 'assistant', 
+      content: 'Генерация изображения...',
+      message_type: 'image_generating',
+      status: 'starting'
+    };
+    setMessages(prev => [...prev, tempMessage]);
     
     try {
       const token = localStorage.getItem('token');
-      const response = await fetch('/api/image/generate', {
+      const response = await fetch('/api/image/generate/stream', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -898,28 +915,98 @@ function App() {
       });
 
       if (!response.ok) {
-        const errorData = await response.json().catch(() => ({ detail: 'Ошибка генерации изображения' }));
-        throw new Error(errorData.detail || `HTTP error! status: ${response.status}`);
+        throw new Error(`HTTP error! status: ${response.status}`);
       }
 
-      const result = await response.json();
-      
-      // Очищаем поле ввода
-      setInputMessage('');
-      
-      // Перезагружаем сообщения чата для отображения нового изображения
-      await loadChatMessages(currentChatId);
-      
-      // Прокручиваем вниз
-      setTimeout(() => {
-        scrollToBottom();
-      }, 100);
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            try {
+              const data = JSON.parse(line.slice(6));
+              
+              if (data.error) {
+                setImageGenerationStatus({ stage: 'error', message: data.error });
+                setMessages(prev => {
+                  const updated = [...prev];
+                  const lastIndex = updated.length - 1;
+                  if (updated[lastIndex]?.message_type === 'image_generating') {
+                    updated[lastIndex] = {
+                      role: 'assistant',
+                      content: `Ошибка: ${data.error}`,
+                      message_type: 'text'
+                    };
+                  }
+                  return updated;
+                });
+                break;
+              }
+              
+              if (data.stage) {
+                setImageGenerationStatus({ stage: data.stage, message: data.message });
+                setMessages(prev => {
+                  const updated = [...prev];
+                  const lastIndex = updated.length - 1;
+                  if (updated[lastIndex]?.message_type === 'image_generating') {
+                    updated[lastIndex] = {
+                      ...updated[lastIndex],
+                      status: data.stage,
+                      content: data.message
+                    };
+                  }
+                  return updated;
+                });
+              }
+              
+              if (data.done && data.success) {
+                // Очищаем поле ввода
+                setInputMessage('');
+                
+                // Перезагружаем сообщения чата для отображения нового изображения
+                await loadChatMessages(currentChatId);
+                
+                // Прокручиваем вниз
+                setTimeout(() => {
+                  scrollToBottom();
+                }, 100);
+                
+                setImageGenerationStatus(null);
+              }
+            } catch (e) {
+              console.error('Ошибка парсинга SSE данных:', e);
+            }
+          }
+        }
+      }
       
     } catch (error) {
       console.error('Ошибка генерации изображения:', error);
-      alert(`Ошибка генерации изображения: ${error.message}`);
+      setImageGenerationStatus({ stage: 'error', message: error.message });
+      setMessages(prev => {
+        const updated = [...prev];
+        const lastIndex = updated.length - 1;
+        if (updated[lastIndex]?.message_type === 'image_generating') {
+          updated[lastIndex] = {
+            role: 'assistant',
+            content: `Ошибка генерации изображения: ${error.message}`,
+            message_type: 'text'
+          };
+        }
+        return updated;
+      });
     } finally {
-      setIsGeneratingImage(false);
+      setIsLoading(false);
+      setImageGenerationStatus(null);
     }
   };
 
@@ -1146,6 +1233,20 @@ function App() {
                       )}
                     </span>
                   </div>
+                ) : message.message_type === 'image_generating' ? (
+                  <div className="message-content image-generating-message">
+                    <div className="image-generating-preview">
+                      <RiLoader4Line className="spin" style={{fontSize: '32px', marginBottom: '10px'}} />
+                      <div className="generating-status">
+                        {message.status === 'starting' && 'Начало генерации...'}
+                        {message.status === 'translating' && 'Перевод описания в промпт...'}
+                        {message.status === 'generating' && 'Генерация изображения...'}
+                        {message.status === 'saving' && 'Сохранение изображения...'}
+                        {message.status === 'error' && 'Ошибка генерации'}
+                        {!message.status && message.content}
+                      </div>
+                    </div>
+                  </div>
                 ) : message.message_type === 'image' && message.image_url ? (
                   <div className="message-content image-message">
                     <div className="image-preview-container">
@@ -1262,7 +1363,7 @@ function App() {
           />
           <button
             onClick={() => setUseWebSearch(!useWebSearch)}
-            disabled={isLoading || isGeneratingImage}
+            disabled={isLoading || isImageMode}
             className={`search-toggle-button ${useWebSearch ? 'active' : ''}`}
             title="Поиск в интернете"
           >
@@ -1273,16 +1374,12 @@ function App() {
             )}
           </button>
           <button
-            onClick={generateImage}
-            disabled={isLoading || isGeneratingImage || !inputMessage.trim()}
-            className={`image-generate-button ${isGeneratingImage ? 'active' : ''}`}
-            title="Генерировать изображение"
+            onClick={() => setIsImageMode(!isImageMode)}
+            disabled={isLoading || useWebSearch}
+            className={`image-toggle-button ${isImageMode ? 'active' : ''}`}
+            title={isImageMode ? "Режим генерации изображения (выкл)" : "Режим генерации изображения (вкл)"}
           >
-            {isGeneratingImage ? (
-              <RiLoader4Line className="spin" style={{fontSize: '18px'}} />
-            ) : (
-              <RiImageAddLine style={{fontSize: '18px'}} />
-            )}
+            <RiImageLine style={{fontSize: '18px'}} />
           </button>
           <button 
             onClick={isLoading ? stopGeneration : sendMessage} 
