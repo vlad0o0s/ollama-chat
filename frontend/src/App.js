@@ -25,7 +25,9 @@ import {
   RiPauseFill,
   RiUserLine,
   RiFileCopyLine,
-  RiCheckLine
+  RiCheckLine,
+  RiImageLine,
+  RiImageAddLine
 } from 'react-icons/ri';
 
 function App() {
@@ -50,9 +52,10 @@ function App() {
   const [chats, setChats] = useState([]);
   const [currentChatId, setCurrentChatId] = useState(null);
   const [searchQuery, setSearchQuery] = useState('');
-  const [useWebSearch, setUseWebSearch] = useState(true); // Включен по умолчанию
+  const [useWebSearch, setUseWebSearch] = useState(false); // Выключен по умолчанию
   const [isSearching, setIsSearching] = useState(false);
   const [searchSources, setSearchSources] = useState([]);
+  const [isGeneratingImage, setIsGeneratingImage] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [showSettings, setShowSettings] = useState(false);
   const [showAuth, setShowAuth] = useState(false);
@@ -870,6 +873,56 @@ function App() {
     textarea.style.height = Math.min(textarea.scrollHeight, 200) + 'px';
   };
 
+  const generateImage = async () => {
+    if (!inputMessage.trim() || isGeneratingImage || isLoading) return;
+    
+    if (!currentChatId) {
+      alert('Пожалуйста, выберите или создайте чат перед генерацией изображения');
+      return;
+    }
+
+    setIsGeneratingImage(true);
+    
+    try {
+      const token = localStorage.getItem('token');
+      const response = await fetch('/api/image/generate', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          chat_id: currentChatId,
+          description: inputMessage.trim()
+        })
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({ detail: 'Ошибка генерации изображения' }));
+        throw new Error(errorData.detail || `HTTP error! status: ${response.status}`);
+      }
+
+      const result = await response.json();
+      
+      // Очищаем поле ввода
+      setInputMessage('');
+      
+      // Перезагружаем сообщения чата для отображения нового изображения
+      await loadChatMessages(currentChatId);
+      
+      // Прокручиваем вниз
+      setTimeout(() => {
+        scrollToBottom();
+      }, 100);
+      
+    } catch (error) {
+      console.error('Ошибка генерации изображения:', error);
+      alert(`Ошибка генерации изображения: ${error.message}`);
+    } finally {
+      setIsGeneratingImage(false);
+    }
+  };
+
   // Функция для сброса высоты textarea к исходному состоянию
   const resetTextareaHeight = () => {
     if (inputRef.current) {
@@ -1093,6 +1146,39 @@ function App() {
                       )}
                     </span>
                   </div>
+                ) : message.message_type === 'image' && message.image_url ? (
+                  <div className="message-content image-message">
+                    <div className="image-preview-container">
+                      <img 
+                        src={message.image_url} 
+                        alt={message.content || "Сгенерированное изображение"}
+                        className="generated-image"
+                        loading="lazy"
+                      />
+                      {message.image_metadata && (
+                        <div className="image-metadata">
+                          <details className="image-prompt-details">
+                            <summary>Промпты</summary>
+                            <div className="prompt-info">
+                              <div className="prompt-section">
+                                <strong>Positive:</strong>
+                                <p>{message.image_metadata.prompt_positive || 'N/A'}</p>
+                              </div>
+                              <div className="prompt-section">
+                                <strong>Negative:</strong>
+                                <p>{message.image_metadata.prompt_negative || 'N/A'}</p>
+                              </div>
+                            </div>
+                          </details>
+                        </div>
+                      )}
+                    </div>
+                    {message.content && (
+                      <div className="message-text">
+                        <MarkdownRenderer content={message.content} />
+                      </div>
+                    )}
+                  </div>
                 ) : (
                   <>
                     <div className="message-content">
@@ -1176,7 +1262,7 @@ function App() {
           />
           <button
             onClick={() => setUseWebSearch(!useWebSearch)}
-            disabled={isLoading}
+            disabled={isLoading || isGeneratingImage}
             className={`search-toggle-button ${useWebSearch ? 'active' : ''}`}
             title="Поиск в интернете"
           >
@@ -1184,6 +1270,18 @@ function App() {
               <RiLoader4Line className="spin" style={{fontSize: '18px'}} />
             ) : (
               <RiSearchLine style={{fontSize: '18px'}} />
+            )}
+          </button>
+          <button
+            onClick={generateImage}
+            disabled={isLoading || isGeneratingImage || !inputMessage.trim()}
+            className={`image-generate-button ${isGeneratingImage ? 'active' : ''}`}
+            title="Генерировать изображение"
+          >
+            {isGeneratingImage ? (
+              <RiLoader4Line className="spin" style={{fontSize: '18px'}} />
+            ) : (
+              <RiImageAddLine style={{fontSize: '18px'}} />
             )}
           </button>
           <button 

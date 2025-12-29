@@ -37,6 +37,17 @@ class Settings(BaseSettings):
     OLLAMA_URL: str = "http://192.168.10.12:11434"
     OLLAMA_DEFAULT_MODEL: str = "gpt-oss:20b"
     
+    # ComfyUI Configuration
+    COMFYUI_URL: str = ""  # URL ComfyUI сервера (обязательно указать в .env)
+    COMFYUI_MODEL: str = "flux1-dev-fp8"
+    COMFYUI_TIMEOUT: int = 300  # секунд (5 минут)
+    COMFYUI_RETRY_ATTEMPTS: int = 3
+    
+    # Image Storage Configuration
+    IMAGE_STORAGE_PATH: str = "static/images"
+    IMAGE_DEFAULT_WIDTH: int = 1024
+    IMAGE_DEFAULT_HEIGHT: int = 1024
+    
     class Config:
         env_file = ".env"
         case_sensitive = True

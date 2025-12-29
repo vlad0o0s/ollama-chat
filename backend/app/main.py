@@ -6,7 +6,7 @@ from pathlib import Path
 import os
 from .config import settings
 from .database import init_db
-from .routes import auth, chats, admin, search_chat
+from .routes import auth, chats, admin, search_chat, image_generation
 from .models.user import User
 from .database import get_db, SessionLocal
 
@@ -30,6 +30,7 @@ app.include_router(auth.router)
 app.include_router(chats.router)
 app.include_router(admin.router)
 app.include_router(search_chat.router)
+app.include_router(image_generation.router)
 
 
 @app.on_event("startup")
@@ -69,6 +70,11 @@ async def health_check():
     """Проверка здоровья сервера"""
     return {"status": "ok"}
 
+
+# Обслуживание статических файлов для изображений
+images_path = Path(settings.IMAGE_STORAGE_PATH)
+if images_path.exists():
+    app.mount("/static/images", StaticFiles(directory=str(images_path)), name="images")
 
 # Обслуживание статических файлов React приложения (если build папка существует)
 build_path = Path("../lastV/build")
