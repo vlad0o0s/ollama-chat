@@ -1114,8 +1114,8 @@
   cursor: not-allowed;
 }
 
-/* Кнопка генерации изображений */
-.image-generate-button {
+/* Переключатель режима генерации изображений */
+.image-toggle-button {
   width: 48px;
   height: 48px;
   flex-shrink: 0;
@@ -1132,26 +1132,49 @@
   box-sizing: border-box;
 }
 
-.image-generate-button:hover:not(:disabled) {
+.image-toggle-button:hover:not(:disabled) {
   background: rgba(255, 140, 0, 0.15);
   border-color: #ff8c00;
   color: #ff8c00;
 }
 
-.image-generate-button.active {
+.image-toggle-button.active {
   background: #ff8c00;
   color: #ffffff;
   border-color: #ff8c00;
 }
 
-.image-generate-button.active:hover:not(:disabled) {
+.image-toggle-button.active:hover:not(:disabled) {
   background: #e67e00;
   border-color: #e67e00;
 }
 
-.image-generate-button:disabled {
+.image-toggle-button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+/* Сообщение о генерации изображения (превью) */
+.image-generating-message {
+  padding: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 200px;
+}
+
+.image-generating-preview {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  color: #8e8ea0;
+}
+
+.generating-status {
+  font-size: 14px;
+  margin-top: 10px;
+  text-align: center;
 }
 
 /* Источники как в ChatGPT */
