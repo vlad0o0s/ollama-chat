@@ -38,7 +38,7 @@ class Settings(BaseSettings):
     OLLAMA_DEFAULT_MODEL: str = "gpt-oss:20b"
     
     # ComfyUI Configuration
-    COMFYUI_URL: str = ""  # URL ComfyUI сервера (обязательно указать в .env)
+    COMFYUI_URL: str = ""  # URL ComfyUI сервера (если пусто и используется Process Manager, будет использован http://127.0.0.1:8188)
     COMFYUI_MODEL: str = "flux1-dev-fp8"
     COMFYUI_TIMEOUT: int = 300  # секунд (5 минут)
     COMFYUI_RETRY_ATTEMPTS: int = 3
@@ -57,6 +57,8 @@ class Settings(BaseSettings):
     GPU_WAIT_TIMEOUT: int = 300  # таймаут ожидания GPU (секунды)
     GPU_PRIORITY_COMFYUI: int = 10  # приоритет ComfyUI (высший)
     GPU_PRIORITY_OLLAMA: int = 5  # приоритет Ollama (средний)
+    GPU_SERVICE_AVAILABILITY_TIMEOUT: int = 60  # таймаут ожидания доступности сервиса (секунды)
+    GPU_ALWAYS_RESTORE_OLLAMA_AFTER_COMFYUI: bool = True  # всегда восстанавливать Ollama после ComfyUI
     
     # Process Management API
     PROCESS_MANAGER_API_URL: str = "http://localhost:8888"  # URL Process Management API (локальный сервер)

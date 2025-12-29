@@ -224,8 +224,16 @@ class ProcessManagerService:
         """Проверяет доступность ComfyUI API"""
         try:
             from ..config import settings
+            # Определяем URL ComfyUI (приоритет локальному, если Process Manager активен)
+            comfyui_url = "http://127.0.0.1:8188"
+            if settings.COMFYUI_URL:
+                comfyui_url = settings.COMFYUI_URL
+            elif await self.check_api_available():
+                # Если Process Manager активен, используем локальный URL
+                comfyui_url = "http://127.0.0.1:8188"
+            
             async with httpx.AsyncClient(timeout=2.0) as client:
-                response = await client.get(f"{settings.COMFYUI_URL}/system_stats")
+                response = await client.get(f"{comfyui_url}/system_stats")
                 return response.status_code == 200
         except:
             return False
@@ -278,6 +286,25 @@ class ProcessManagerService:
         elif service_type == ServiceType.COMFYUI:
             return await self._check_comfyui_available()
         else:
+            return False
+    
+    async def ensure_ollama_active(self) -> bool:
+        """
+        Явно переключается на Ollama (используется после освобождения ComfyUI)
+        
+        Returns:
+            True если переключение успешно
+        """
+        logger.info("🔄 Принудительное переключение на Ollama...")
+        try:
+            success = await self.switch_to_service(ServiceType.OLLAMA)
+            if success:
+                logger.info("✅ Ollama активирован")
+                # Сбрасываем _service_before_request, так как это явное переключение
+                self._service_before_request = None
+            return success
+        except Exception as e:
+            logger.error(f"❌ Ошибка принудительного переключения на Ollama: {e}")
             return False
 
 

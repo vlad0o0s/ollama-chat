@@ -30,6 +30,8 @@ router = APIRouter(prefix="/api/image", tags=["image-generation"])
 class ImageGenerationRequest(BaseModel):
     chat_id: int
     description: str = Field(..., min_length=1, max_length=2000, description="Описание изображения на русском языке")
+    width: Optional[int] = Field(None, description="Ширина изображения (если не указано, используется значение по умолчанию)")
+    height: Optional[int] = Field(None, description="Высота изображения (если не указано, используется значение по умолчанию)")
 
 
 class ImageGenerationResponse(BaseModel):
@@ -129,11 +131,13 @@ async def generate_image(
         
         # Шаг 3: Генерируем изображение через ComfyUI с управлением ресурсами
         logger.info(f"🔄 Генерация изображения через ComfyUI...")
+        image_width = request.width or settings.IMAGE_DEFAULT_WIDTH
+        image_height = request.height or settings.IMAGE_DEFAULT_HEIGHT
         generation_result = await comfyui_service.generate_image(
             prompt=positive_prompt,
             negative_prompt=negative_prompt,
-            width=settings.IMAGE_DEFAULT_WIDTH,
-            height=settings.IMAGE_DEFAULT_HEIGHT,
+            width=image_width,
+            height=image_height,
             user_id=current_user.id
         )
         
@@ -168,8 +172,8 @@ async def generate_image(
             "prompt_positive": positive_prompt,
             "prompt_negative": negative_prompt,
             "filename": filename,
-            "width": settings.IMAGE_DEFAULT_WIDTH,
-            "height": settings.IMAGE_DEFAULT_HEIGHT,
+            "width": image_width,
+            "height": image_height,
             "model": settings.COMFYUI_MODEL
         }
         
@@ -286,11 +290,13 @@ async def generate_image_stream(
             yield f"data: {json.dumps({'stage': 'generating', 'message': 'Генерация изображения...', 'done': False})}\n\n"
             
             # Шаг 3: Генерируем изображение
+            image_width = request.width or settings.IMAGE_DEFAULT_WIDTH
+            image_height = request.height or settings.IMAGE_DEFAULT_HEIGHT
             generation_result = await comfyui_service.generate_image(
                 prompt=positive_prompt,
                 negative_prompt=negative_prompt,
-                width=settings.IMAGE_DEFAULT_WIDTH,
-                height=settings.IMAGE_DEFAULT_HEIGHT,
+                width=image_width,
+                height=image_height,
                 user_id=current_user.id
             )
             
@@ -320,8 +326,8 @@ async def generate_image_stream(
                 "prompt_positive": positive_prompt,
                 "prompt_negative": negative_prompt,
                 "filename": filename,
-                "width": settings.IMAGE_DEFAULT_WIDTH,
-                "height": settings.IMAGE_DEFAULT_HEIGHT,
+                "width": image_width,
+                "height": image_height,
                 "model": settings.COMFYUI_MODEL
             }
             

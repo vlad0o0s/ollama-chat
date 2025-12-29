@@ -67,6 +67,8 @@ class ResourceManager:
         self.priority_comfyui = settings.GPU_PRIORITY_COMFYUI
         self.priority_ollama = settings.GPU_PRIORITY_OLLAMA
         self.wait_timeout = settings.GPU_WAIT_TIMEOUT
+        self.service_availability_timeout = settings.GPU_SERVICE_AVAILABILITY_TIMEOUT
+        self.always_restore_ollama_after_comfyui = settings.GPU_ALWAYS_RESTORE_OLLAMA_AFTER_COMFYUI
         
         # Метрики
         self._total_requests = 0
@@ -134,6 +136,17 @@ class ResourceManager:
         
         self._total_requests += 1
         logger.info(f"🔄 Запрос GPU для {service_type.value} (приоритет: {priority}, ID: {request.request_id[:8]}, всего запросов: {self._total_requests})")
+        
+        # Проверяем доступность Process Manager API
+        # Если Process Manager доступен, сервис будет запущен при переключении процесса
+        api_available = await process_manager_service.check_api_available()
+        if not api_available:
+            # Если Process Manager недоступен, проверяем доступность сервиса напрямую
+            service_available = await process_manager_service.check_service_available(service_type)
+            if not service_available:
+                error_msg = f"Сервис {service_type.value} недоступен и Process Manager API не доступен"
+                logger.error(f"❌ {error_msg}")
+                raise RuntimeError(error_msg)
         
         async with self._lock:
             # Проверяем, можем ли сразу получить блокировку
@@ -231,18 +244,22 @@ class ResourceManager:
             
             # Проверяем, что это текущая активная блокировка
             if self._gpu_lock and self._gpu_lock.lock_id == lock_id:
-                service_type = lock.request.service_type.value
+                service_type = lock.request.service_type
+                service_type_value = service_type.value
                 usage_time = time.time() - lock.acquired_at
                 self._total_usage_time += usage_time
                 avg_usage = self._total_usage_time / max(1, self._total_requests - self._total_timeouts)
-                logger.info(f"🔓 GPU освобожден от {service_type} (использовано: {usage_time:.1f}s, ID: {lock_id[:8]}, среднее использование: {avg_usage:.1f}s)")
+                logger.info(f"🔓 GPU освобожден от {service_type_value} (использовано: {usage_time:.1f}s, ID: {lock_id[:8]}, среднее использование: {avg_usage:.1f}s)")
                 
-                # Восстанавливаем предыдущий процесс (если нужно)
-                await self._restore_previous_process()
+                # Сохраняем информацию о сервисе перед освобождением
+                released_service = service_type
                 
                 self._gpu_lock = None
                 del self._active_locks[lock_id]
                 lock._released = True
+                
+                # Восстанавливаем предыдущий процесс (если нужно)
+                await self._restore_previous_process(released_service)
                 
                 # Обрабатываем очередь
                 await self._process_queue()
@@ -254,6 +271,28 @@ class ResourceManager:
         while self._queue and self._gpu_lock is None:
             # Берем запрос с наивысшим приоритетом
             request = heapq.heappop(self._queue)
+            
+            # Проверяем доступность сервиса перед обработкой
+            service_available = await process_manager_service.check_service_available(request.service_type)
+            if not service_available:
+                # Проверяем, доступен ли Process Manager
+                api_available = await process_manager_service.check_api_available()
+                if api_available:
+                    logger.info(f"⏳ Сервис {request.service_type.value} недоступен для запроса из очереди. Ожидание запуска...")
+                    # Ждем доступности сервиса
+                    service_available = await self._wait_for_service_availability(
+                        request.service_type, 
+                        self.service_availability_timeout
+                    )
+                    if not service_available:
+                        logger.warning(f"⚠️ Сервис {request.service_type.value} не стал доступен. Возвращаем запрос в очередь")
+                        # Возвращаем запрос в очередь (в конец)
+                        heapq.heappush(self._queue, request)
+                        break
+                else:
+                    logger.warning(f"⚠️ Process Manager недоступен. Возвращаем запрос в очередь")
+                    heapq.heappush(self._queue, request)
+                    break
             
             # Сначала переключаем процесс на нужный сервис (это освободит VRAM)
             await self._switch_process_if_needed(request.service_type)
@@ -373,12 +412,52 @@ class ResourceManager:
             logger.error(f"❌ Ошибка переключения процесса: {e}")
             # Продолжаем работу даже если переключение не удалось (fallback)
     
-    async def _restore_previous_process(self):
-        """Восстанавливает предыдущий процесс после освобождения GPU"""
+    async def _restore_previous_process(self, released_service: ServiceType):
+        """
+        Восстанавливает предыдущий процесс после освобождения GPU
+        
+        Args:
+            released_service: Тип сервиса, который был освобожден
+        """
         try:
-            await process_manager_service.restore_previous_service()
+            # Если освобождается ComfyUI и включена настройка - всегда переключаться на Ollama
+            if released_service == ServiceType.COMFYUI and self.always_restore_ollama_after_comfyui:
+                logger.info("🔄 Освобождается ComfyUI, переключаемся на Ollama...")
+                await process_manager_service.ensure_ollama_active()
+            else:
+                # Для других случаев используем стандартную логику восстановления
+                await process_manager_service.restore_previous_service()
         except Exception as e:
             logger.debug(f"Ошибка восстановления процесса (не критично): {e}")
+    
+    async def _wait_for_service_availability(self, service_type: ServiceType, timeout: int) -> bool:
+        """
+        Ожидает доступности сервиса с таймаутом
+        
+        Args:
+            service_type: Тип сервиса для проверки
+            timeout: Таймаут ожидания в секундах
+            
+        Returns:
+            True если сервис стал доступен, False при таймауте
+        """
+        start_time = time.time()
+        check_interval = 2  # Проверяем каждые 2 секунды
+        
+        while True:
+            elapsed = time.time() - start_time
+            if elapsed >= timeout:
+                logger.warning(f"⚠️ Таймаут ожидания доступности {service_type.value} ({timeout}s)")
+                return False
+            
+            # Проверяем доступность сервиса
+            available = await process_manager_service.check_service_available(service_type)
+            if available:
+                logger.info(f"✅ Сервис {service_type.value} стал доступен (ожидание: {elapsed:.1f}s)")
+                return True
+            
+            # Ждем перед следующей проверкой
+            await asyncio.sleep(check_interval)
 
 
 # Глобальный экземпляр диспетчера

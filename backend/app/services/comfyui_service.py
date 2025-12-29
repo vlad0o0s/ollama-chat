@@ -29,34 +29,61 @@ class ComfyUIService:
         
     def _detect_comfyui_url(self) -> str:
         """
-        Определяет доступный URL ComfyUI из настроек
+        Определяет доступный URL ComfyUI из настроек или автоматически
         """
-        # Используем URL из настроек
-        comfyui_url = settings.COMFYUI_URL
+        # Список адресов для проверки (в порядке приоритета)
+        urls_to_try = []
         
-        if not comfyui_url:
-            logger.error("❌ COMFYUI_URL не установлен в настройках")
-            raise ValueError("COMFYUI_URL должен быть установлен в .env файле")
+        # 1. Если указан COMFYUI_URL в настройках, используем его первым
+        if settings.COMFYUI_URL:
+            urls_to_try.append(settings.COMFYUI_URL)
         
-        # Проверяем доступность (синхронно, так как это инициализация)
-        try:
-            import httpx
+        # 2. Проверяем, используется ли Process Manager API
+        # Если используется, ComfyUI запускается локально на 127.0.0.1:8188
+        if settings.PROCESS_MANAGER_API_URL:
+            local_url = "http://127.0.0.1:8188"
+            if local_url not in urls_to_try:
+                urls_to_try.append(local_url)
+        
+        # 3. Добавляем локальный адрес по умолчанию
+        default_local = "http://127.0.0.1:8188"
+        if default_local not in urls_to_try:
+            urls_to_try.append(default_local)
+        
+        # Если ничего не указано, используем локальный адрес
+        if not urls_to_try:
+            urls_to_try.append(default_local)
+        
+        # Проверяем доступность каждого адреса
+        import httpx
+        for url in urls_to_try:
             try:
                 with httpx.Client(timeout=2.0) as client:
-                    response = client.get(f"{comfyui_url}/system_stats")
+                    response = client.get(f"{url}/system_stats")
                     if response.status_code == 200:
-                        logger.info(f"✅ ComfyUI обнаружен на {comfyui_url}")
-                        return comfyui_url
-                    else:
-                        logger.warning(f"⚠️ ComfyUI недоступен на {comfyui_url} (статус: {response.status_code})")
+                        logger.info(f"✅ ComfyUI обнаружен на {url}")
+                        return url
+            except httpx.ConnectError:
+                logger.debug(f"⚠️ ComfyUI недоступен на {url} (ConnectionError)")
+                continue
+            except httpx.TimeoutException:
+                logger.debug(f"⚠️ Таймаут подключения к {url}")
+                continue
             except Exception as e:
-                logger.warning(f"⚠️ ComfyUI недоступен на {comfyui_url}: {e}")
-                logger.info(f"ℹ️ Используется URL из настроек: {comfyui_url}")
-        except ImportError:
-            logger.warning("⚠️ httpx не установлен, пропускаем проверку доступности ComfyUI")
+                logger.debug(f"⚠️ Ошибка проверки {url}: {e}")
+                continue
         
-        # Возвращаем URL из настроек даже если проверка не удалась
-        return comfyui_url
+        # Если ни один адрес не доступен, выбираем приоритетный
+        # Если Process Manager используется, используем локальный адрес
+        if settings.PROCESS_MANAGER_API_URL:
+            selected_url = "http://127.0.0.1:8188"
+            logger.info(f"ℹ️ ComfyUI недоступен сейчас, но будет запущен через Process Manager на {selected_url}")
+            return selected_url
+        
+        # Иначе используем первый из списка (из настроек или локальный)
+        selected_url = urls_to_try[0]
+        logger.warning(f"⚠️ ComfyUI недоступен на всех проверенных адресах, используем {selected_url}")
+        return selected_url
     
     def _load_workflow_template(self) -> Optional[Dict]:
         """
@@ -92,14 +119,76 @@ class ComfyUIService:
             logger.error(f"❌ Ошибка загрузки workflow шаблона: {e}")
             return None
     
+    def _update_url_if_needed(self) -> bool:
+        """
+        Обновляет base_url если ComfyUI стал доступен на другом адресе
+        (например, был запущен через Process Manager)
+        
+        Returns:
+            True если URL был обновлен
+        """
+        # Проверяем локальный адрес, если используется Process Manager
+        if settings.PROCESS_MANAGER_API_URL:
+            local_url = "http://127.0.0.1:8188"
+            if self.base_url != local_url:
+                try:
+                    import httpx
+                    with httpx.Client(timeout=2.0) as client:
+                        response = client.get(f"{local_url}/system_stats")
+                        if response.status_code == 200:
+                            logger.info(f"✅ ComfyUI доступен на {local_url}, обновляем URL")
+                            self.base_url = local_url
+                            return True
+                        else:
+                            logger.debug(f"⚠️ ComfyUI на {local_url} вернул статус {response.status_code}")
+                except httpx.ConnectError as e:
+                    logger.debug(f"⚠️ Не удалось подключиться к ComfyUI на {local_url}: {e}")
+                except httpx.TimeoutException:
+                    logger.debug(f"⚠️ Таймаут подключения к ComfyUI на {local_url}")
+                except Exception as e:
+                    logger.debug(f"⚠️ Ошибка проверки ComfyUI на {local_url}: {e}")
+        
+        return False
+    
     async def check_connection(self) -> bool:
         """Проверяет доступность ComfyUI сервера"""
+        # Сначала пытаемся обновить URL, если нужно
+        self._update_url_if_needed()
+        
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
                 response = await client.get(f"{self.base_url}/system_stats")
-                return response.status_code == 200
+                if response.status_code == 200:
+                    logger.debug(f"✅ ComfyUI доступен на {self.base_url}")
+                    return True
+                else:
+                    logger.warning(f"⚠️ ComfyUI на {self.base_url} вернул статус {response.status_code}")
+                    # Если текущий URL не работает, пытаемся найти рабочий
+                    if self._update_url_if_needed():
+                        # Повторная проверка с новым URL
+                        response = await client.get(f"{self.base_url}/system_stats")
+                        if response.status_code == 200:
+                            logger.info(f"✅ ComfyUI доступен после обновления URL на {self.base_url}")
+                            return True
+                    return False
+        except httpx.ConnectError as e:
+            logger.error(f"❌ Ошибка подключения к ComfyUI на {self.base_url}: {e}")
+            # Если подключение не удалось, пытаемся обновить URL
+            if self._update_url_if_needed():
+                try:
+                    async with httpx.AsyncClient(timeout=5.0) as client:
+                        response = await client.get(f"{self.base_url}/system_stats")
+                        if response.status_code == 200:
+                            logger.info(f"✅ ComfyUI доступен после обновления URL на {self.base_url}")
+                            return True
+                except Exception as retry_e:
+                    logger.error(f"❌ Повторная попытка подключения к ComfyUI не удалась: {retry_e}")
+            return False
+        except httpx.TimeoutException:
+            logger.error(f"❌ Таймаут подключения к ComfyUI на {self.base_url}")
+            return False
         except Exception as e:
-            logger.error(f"Ошибка подключения к ComfyUI: {e}")
+            logger.error(f"❌ Неожиданная ошибка при проверке подключения к ComfyUI на {self.base_url}: {e}")
             return False
     
     def create_workflow(self, prompt: str, negative_prompt: str, width: int = 1024, height: int = 1024) -> Dict:
@@ -182,13 +271,72 @@ class ComfyUIService:
         elif positive_node:
             logger.warning("⚠️ Не найдена нода для negative промпта")
         
-        # Ищем ноду EmptyLatentImage для обновления размеров
+        # Ищем ноды, которые могут содержать размеры изображения
+        # EmptyLatentImage - стандартная нода для размеров
+        # Также могут быть другие ноды с width/height
+        size_updated = False
+        
+        # Список возможных типов нод, которые могут содержать размеры
+        size_node_types = [
+            "EmptyLatentImage",
+            "LatentUpscale",
+            "ImageUpscale",
+            "VAEDecode",
+            "VAEEncode",
+            "KSampler",
+            "KSamplerAdvanced"
+        ]
+        
+        # Сначала ищем EmptyLatentImage (приоритет)
         for node_id, node_data in workflow.items():
             if isinstance(node_data, dict) and node_data.get("class_type") == "EmptyLatentImage":
-                node_data["inputs"]["width"] = width
-                node_data["inputs"]["height"] = height
-                logger.debug(f"✅ Обновлены размеры в ноде {node_id[:8]}: {width}x{height}")
-                break
+                if "inputs" in node_data:
+                    node_data["inputs"]["width"] = width
+                    node_data["inputs"]["height"] = height
+                    logger.info(f"✅ Обновлены размеры в EmptyLatentImage ноде {node_id[:8]}: {width}x{height}")
+                    size_updated = True
+                    break
+        
+        # Если не нашли EmptyLatentImage, ищем любую ноду с width/height в inputs
+        if not size_updated:
+            logger.debug(f"🔍 EmptyLatentImage не найдена, ищем другие ноды с width/height...")
+            nodes_with_size = []
+            for node_id, node_data in workflow.items():
+                if isinstance(node_data, dict) and "inputs" in node_data:
+                    inputs = node_data.get("inputs", {})
+                    if "width" in inputs or "height" in inputs:
+                        class_type = node_data.get("class_type", "unknown")
+                        current_w = inputs.get("width", "N/A")
+                        current_h = inputs.get("height", "N/A")
+                        nodes_with_size.append({
+                            "node_id": node_id,
+                            "class_type": class_type,
+                            "width": current_w,
+                            "height": current_h
+                        })
+            
+            if nodes_with_size:
+                logger.debug(f"🔍 Найдено {len(nodes_with_size)} нод(ы) с размерами:")
+                for node_info in nodes_with_size:
+                    logger.debug(f"   - {node_info['class_type']} ({node_info['node_id'][:8]}): {node_info['width']}x{node_info['height']}")
+                
+                # Обновляем первую найденную ноду с размерами
+                first_node = nodes_with_size[0]
+                node_id = first_node["node_id"]
+                workflow[node_id]["inputs"]["width"] = width
+                workflow[node_id]["inputs"]["height"] = height
+                logger.info(f"✅ Обновлены размеры в ноде {first_node['class_type']} ({node_id[:8]}): {width}x{height}")
+                size_updated = True
+            else:
+                logger.warning(f"⚠️ Не найдено ни одной ноды с width/height в workflow")
+        
+        if not size_updated:
+            logger.error(f"❌ Не удалось обновить размеры в workflow (width={width}, height={height})")
+            logger.debug(f"🔍 Доступные ноды в workflow:")
+            for node_id, node_data in workflow.items():
+                if isinstance(node_data, dict):
+                    class_type = node_data.get("class_type", "unknown")
+                    logger.debug(f"   - {class_type} ({node_id[:8]})")
         
         # Обновляем seed в KSampler (если есть)
         for node_id, node_data in workflow.items():
@@ -421,21 +569,12 @@ class ComfyUIService:
                 "error": Optional[str]
             }
         """
-        # Проверяем подключение
-        if not await self.check_connection():
-            return {
-                "success": False,
-                "image": None,
-                "filename": None,
-                "prompt_id": None,
-                "error": "ComfyUI сервер недоступен"
-            }
-        
         # Оцениваем требуемую VRAM (примерно 4-6GB для flux1-dev-fp8)
         # Уменьшаем требования, так как процесс будет переключен перед использованием
         estimated_vram_mb = 4096  # 4GB - после переключения процессов VRAM будет свободна
         
         # Получаем блокировку GPU через Resource Manager
+        # Это автоматически переключит процесс на ComfyUI
         try:
             async with await resource_manager.acquire_gpu(
                 service_type=ServiceType.COMFYUI,
@@ -445,8 +584,65 @@ class ComfyUIService:
             ) as gpu_lock:
                 logger.info(f"🔒 GPU заблокирован для ComfyUI (ID: {gpu_lock.lock_id[:8]})")
                 
+                # После переключения процесса обновляем URL и проверяем подключение
+                logger.info(f"🔄 Проверка доступности ComfyUI после переключения процесса...")
+                logger.info(f"   Текущий URL: {self.base_url}")
+                self._update_url_if_needed()
+                
+                # Даем время на запуск ComfyUI после переключения процесса
+                logger.info(f"⏳ Ожидание запуска ComfyUI (5 секунд)...")
+                await asyncio.sleep(5)
+                
+                # Проверяем подключение (теперь процесс уже переключен на ComfyUI)
+                logger.info(f"🔄 Проверка подключения к ComfyUI на {self.base_url}...")
+                max_retries = 3
+                retry_delay = 3
+                connection_ok = False
+                
+                for attempt in range(max_retries):
+                    connection_ok = await self.check_connection()
+                    if connection_ok:
+                        break
+                    if attempt < max_retries - 1:
+                        logger.warning(f"⚠️ Попытка {attempt + 1}/{max_retries}: ComfyUI еще не доступен, повтор через {retry_delay}s...")
+                        await asyncio.sleep(retry_delay)
+                
+                if not connection_ok:
+                    error_msg = f"ComfyUI сервер недоступен на {self.base_url} после переключения процесса"
+                    logger.error(f"❌ {error_msg}")
+                    logger.error(f"   Проверьте, что ComfyUI запущен и доступен на этом адресе")
+                    if settings.PROCESS_MANAGER_API_URL:
+                        logger.error(f"   Process Manager настроен: {settings.PROCESS_MANAGER_API_URL}")
+                        logger.error(f"   Проверьте логи Process Manager для деталей запуска ComfyUI")
+                    return {
+                        "success": False,
+                        "image": None,
+                        "filename": None,
+                        "prompt_id": None,
+                        "error": error_msg
+                    }
+                
+                logger.info(f"✅ ComfyUI доступен и готов к работе")
+                
                 # Создаем workflow
+                logger.info(f"🔄 Создание workflow с размерами: {width}x{height}")
                 workflow = self.create_workflow(prompt, negative_prompt, width, height)
+                
+                # Проверяем, что размеры действительно установлены в workflow
+                size_found = False
+                for node_id, node_data in workflow.items():
+                    if isinstance(node_data, dict) and "inputs" in node_data:
+                        inputs = node_data.get("inputs", {})
+                        if "width" in inputs and "height" in inputs:
+                            w = inputs.get("width")
+                            h = inputs.get("height")
+                            if w == width and h == height:
+                                size_found = True
+                                logger.info(f"✅ Подтверждено: размеры {width}x{height} установлены в ноде {node_id[:8]} (класс: {node_data.get('class_type', 'unknown')})")
+                                break
+                
+                if not size_found:
+                    logger.warning(f"⚠️ Размеры {width}x{height} не найдены в workflow после создания. Проверьте шаблон.")
                 
                 # Добавляем в очередь ComfyUI
                 prompt_id = await self.queue_prompt(workflow)

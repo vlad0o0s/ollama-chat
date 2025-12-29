@@ -399,7 +399,7 @@ def start_comfyui() -> Tuple[bool, Optional[int]]:
             logger.error(f"❌ main.py не найден: {main_py}")
             return False, None
         
-        # Формируем команду запуска
+        # Формируем команду запуска (как в run_nvidia_gpu.bat)
         # Используем относительный путь к main.py от рабочей директории
         main_py_relative = "ComfyUI\\main.py"
         
@@ -411,13 +411,31 @@ def start_comfyui() -> Tuple[bool, Optional[int]]:
             '--listen', '0.0.0.0',
             '--port', '8188'
         ]
+        shell = False
+        
+        # Проверяем наличие batch файла для справки
+        batch_file = comfyui_path / "run_nvidia_gpu.bat"
+        if batch_file.exists():
+            logger.info(f"📋 Найден batch файл для справки: {batch_file}")
+            try:
+                with open(batch_file, 'r', encoding='utf-8') as f:
+                    batch_content = f.read().strip()
+                    logger.info(f"   Содержимое: {batch_content}")
+            except:
+                pass
         
         logger.info(f"🚀 Запуск ComfyUI...")
         logger.info(f"   Путь: {COMFYUI_PATH}")
         logger.info(f"   Python: {python_exe}")
-        logger.info(f"   Main.py: {main_py_relative}")
-        logger.info(f"   Команда: {' '.join(command)}")
+        logger.info(f"   Main.py: ComfyUI\\main.py")
+        logger.info(f"   Команда: {' '.join(command) if isinstance(command, list) else command}")
         logger.info(f"   Рабочая директория: {comfyui_path}")
+        
+        # Инициализируем переменные для логирования вывода
+        import threading
+        output_lines = []
+        output_lock = threading.Lock()
+        process = None
         
         # Запускаем процесс
         try:
@@ -425,30 +443,58 @@ def start_comfyui() -> Tuple[bool, Optional[int]]:
                 command,
                 cwd=str(comfyui_path),
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                shell=False
+                stderr=subprocess.STDOUT,  # Объединяем stderr в stdout
+                shell=shell,
+                text=True,  # Текстовый режим для лучшего логирования
+                bufsize=1  # Строковая буферизация
             )
             
             _process_pids['comfyui'] = process.pid
-            logger.info(f"✅ ComfyUI запущен (PID: {process.pid})")
+            logger.info(f"✅ ComfyUI процесс запущен (PID: {process.pid})")
+            
+            # Запускаем поток для чтения вывода в реальном времени
+            def read_output():
+                """Читает вывод процесса в реальном времени"""
+                try:
+                    for line in process.stdout:
+                        line = line.strip()
+                        if line:
+                            with output_lock:
+                                output_lines.append(line)
+                            # Логируем важные сообщения
+                            if any(keyword in line.lower() for keyword in ['error', 'exception', 'traceback', 'failed']):
+                                logger.warning(f"⚠️ ComfyUI: {line}")
+                            elif any(keyword in line.lower() for keyword in ['starting', 'listening', 'server']):
+                                logger.info(f"ℹ️ ComfyUI: {line}")
+                except Exception as e:
+                    logger.debug(f"Ошибка чтения вывода: {e}")
+            
+            output_thread = threading.Thread(target=read_output, daemon=True)
+            output_thread.start()
             
             # Проверяем, что процесс не завершился сразу
-            time.sleep(2)  # Увеличено время ожидания
+            time.sleep(3)  # Даем время на запуск
             if process.poll() is not None:
-                # Процесс завершился, читаем ошибки
+                # Процесс завершился, читаем оставшийся вывод
                 try:
-                    stdout, stderr = process.communicate(timeout=5)
+                    remaining_output, _ = process.communicate(timeout=5)
+                    if remaining_output:
+                        with output_lock:
+                            output_lines.extend(remaining_output.strip().split('\n'))
                 except subprocess.TimeoutExpired:
-                    stdout, stderr = b"", b""
+                    pass
                 
-                logger.error(f"❌ ComfyUI завершился сразу после запуска")
+                logger.error(f"❌ ComfyUI завершился сразу после запуска (PID: {process.pid})")
                 logger.error(f"   Код возврата: {process.returncode}")
-                if stdout:
-                    stdout_text = stdout.decode('utf-8', errors='ignore')
-                    logger.error(f"   STDOUT (первые 500 символов): {stdout_text[:500]}")
-                if stderr:
-                    stderr_text = stderr.decode('utf-8', errors='ignore')
-                    logger.error(f"   STDERR (первые 500 символов): {stderr_text[:500]}")
+                
+                # Выводим последние строки вывода
+                with output_lock:
+                    if output_lines:
+                        logger.error(f"   Последние строки вывода ({len(output_lines)} строк):")
+                        for line in output_lines[-20:]:  # Последние 20 строк
+                            logger.error(f"      {line}")
+                    else:
+                        logger.error(f"   Вывод недоступен (процесс завершился слишком быстро)")
                 
                 # Очищаем PID
                 if 'comfyui' in _process_pids:
@@ -464,15 +510,23 @@ def start_comfyui() -> Tuple[bool, Optional[int]]:
             logger.error(f"   Traceback: {traceback.format_exc()}")
             return False, None
         
+        # Проверяем, что процесс был создан
+        if process is None:
+            logger.error("❌ Процесс ComfyUI не был создан")
+            return False, None
+        
         # Проверяем, что процесс все еще запущен
         if process.poll() is not None:
             logger.error(f"❌ ComfyUI процесс завершился во время ожидания (PID: {process.pid}, код: {process.returncode})")
             try:
-                stdout, stderr = process.communicate(timeout=5)
-                if stdout:
-                    logger.error(f"   STDOUT: {stdout.decode('utf-8', errors='ignore')[:500]}")
-                if stderr:
-                    logger.error(f"   STDERR: {stderr.decode('utf-8', errors='ignore')[:500]}")
+                remaining_output, _ = process.communicate(timeout=5)
+                with output_lock:
+                    if remaining_output:
+                        output_lines.extend(remaining_output.strip().split('\n'))
+                    if output_lines:
+                        logger.error(f"   Последние строки вывода:")
+                        for line in output_lines[-20:]:
+                            logger.error(f"      {line}")
             except:
                 pass
             if 'comfyui' in _process_pids:
@@ -489,6 +543,17 @@ def start_comfyui() -> Tuple[bool, Optional[int]]:
             # Проверяем, что процесс все еще запущен
             if process.poll() is not None:
                 logger.error(f"❌ ComfyUI процесс завершился во время ожидания (PID: {process.pid}, код: {process.returncode})")
+                try:
+                    remaining_output, _ = process.communicate(timeout=2)
+                    with output_lock:
+                        if remaining_output:
+                            output_lines.extend(remaining_output.strip().split('\n'))
+                        if output_lines:
+                            logger.error(f"   Последние строки вывода:")
+                            for line in output_lines[-10:]:
+                                logger.error(f"      {line}")
+                except:
+                    pass
                 if 'comfyui' in _process_pids:
                     del _process_pids['comfyui']
                 return False, None
@@ -506,12 +571,31 @@ def start_comfyui() -> Tuple[bool, Optional[int]]:
         # Проверяем финальный статус процесса
         if process.poll() is not None:
             logger.error(f"❌ ComfyUI процесс завершился (PID: {process.pid}, код: {process.returncode})")
+            try:
+                remaining_output, _ = process.communicate(timeout=2)
+                with output_lock:
+                    if remaining_output:
+                        output_lines.extend(remaining_output.strip().split('\n'))
+                    if output_lines:
+                        logger.error(f"   Последние строки вывода:")
+                        for line in output_lines[-20:]:
+                            logger.error(f"      {line}")
+            except:
+                pass
             if 'comfyui' in _process_pids:
                 del _process_pids['comfyui']
             return False, None
         
+        # Выводим информацию о выводе процесса
+        with output_lock:
+            if output_lines:
+                logger.info(f"ℹ️ ComfyUI вывод ({len(output_lines)} строк), последние строки:")
+                for line in output_lines[-5:]:
+                    logger.info(f"      {line}")
+        
         logger.warning(f"⚠️ ComfyUI процесс запущен (PID: {process.pid}), но API не отвечает после ожидания {max_wait}s")
         logger.warning("   Возможно, ComfyUI еще инициализируется или есть проблемы с сетью")
+        logger.warning(f"   Проверьте логи Process Manager для деталей")
         return True, process.pid  # Возвращаем True, так как процесс запущен
     except Exception as e:
         logger.error(f"❌ Ошибка запуска ComfyUI: {e}")

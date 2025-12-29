@@ -4,11 +4,23 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pathlib import Path
 import os
+import logging
 from .config import settings
 from .database import init_db
 from .routes import auth, chats, admin, search_chat, image_generation
 from .models.user import User
 from .database import get_db, SessionLocal
+
+# Настройка логирования
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+
+# Устанавливаем уровень логирования для всех модулей
+logging.getLogger("app").setLevel(logging.INFO)
+logging.getLogger("uvicorn").setLevel(logging.INFO)
 
 app = FastAPI(
     title="Ollama Chat API",
