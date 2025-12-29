@@ -27,6 +27,27 @@ class Settings(BaseSettings):
     # CORS
     CORS_ORIGINS: str = "http://localhost:3000,http://localhost:5000"
     
+    # Tavily Search API
+    TAVILY_API_KEY: str = ""
+    TAVILY_SEARCH_DEPTH: str = "basic"  # "basic" or "advanced"
+    TAVILY_MAX_RESULTS: int = 5
+    TAVILY_SEARCH_TIMEOUT: int = 10  # seconds
+    
+    # Ollama Configuration
+    OLLAMA_URL: str = "http://192.168.10.12:11434"
+    OLLAMA_DEFAULT_MODEL: str = "gpt-oss:20b"
+    
+    # ComfyUI Configuration
+    COMFYUI_URL: str = ""  # URL ComfyUI сервера (обязательно указать в .env)
+    COMFYUI_MODEL: str = "flux1-dev-fp8"
+    COMFYUI_TIMEOUT: int = 300  # секунд (5 минут)
+    COMFYUI_RETRY_ATTEMPTS: int = 3
+    
+    # Image Storage Configuration
+    IMAGE_STORAGE_PATH: str = "static/images"
+    IMAGE_DEFAULT_WIDTH: int = 1024
+    IMAGE_DEFAULT_HEIGHT: int = 1024
+    
     class Config:
         env_file = ".env"
         case_sensitive = True

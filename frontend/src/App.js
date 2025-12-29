@@ -25,7 +25,9 @@ import {
   RiPauseFill,
   RiUserLine,
   RiFileCopyLine,
-  RiCheckLine
+  RiCheckLine,
+  RiImageLine,
+  RiImageAddLine
 } from 'react-icons/ri';
 
 function App() {
@@ -50,6 +52,10 @@ function App() {
   const [chats, setChats] = useState([]);
   const [currentChatId, setCurrentChatId] = useState(null);
   const [searchQuery, setSearchQuery] = useState('');
+  const [useWebSearch, setUseWebSearch] = useState(false); // Выключен по умолчанию
+  const [isSearching, setIsSearching] = useState(false);
+  const [searchSources, setSearchSources] = useState([]);
+  const [isGeneratingImage, setIsGeneratingImage] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [showSettings, setShowSettings] = useState(false);
   const [showAuth, setShowAuth] = useState(false);
@@ -538,22 +544,43 @@ function App() {
       
       const startTime = Date.now();
       
-      // Используем fetch вместо axios для потокового чтения
-      const response = await fetch(`${ollamaUrl}/api/chat`, {
-        method: 'POST',
-        mode: 'cors',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          model: model,
-          messages: newMessages,
-          stream: true
-        }),
-        signal: controller.signal,
-        // Добавляем таймаут для запроса
-        timeout: 300000 // 5 минут
-      });
+      // Используем поиск, если включен
+      let response;
+      if (useWebSearch) {
+        setIsSearching(true);
+        setSearchSources([]);
+        
+        const token = localStorage.getItem('token');
+        response = await fetch('/api/chat/search', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`
+          },
+          body: JSON.stringify({
+            message: inputMessage,
+            chat_id: chatId,
+            use_search: true
+          }),
+          signal: controller.signal
+        });
+      } else {
+        // Используем прямой запрос к Ollama (старый способ)
+        response = await fetch(`${ollamaUrl}/api/chat`, {
+          method: 'POST',
+          mode: 'cors',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            model: model,
+            messages: newMessages,
+            stream: true
+          }),
+          signal: controller.signal,
+          timeout: 300000
+        });
+      }
 
       const endTime = Date.now();
       const responseTime = endTime - startTime;
@@ -567,11 +594,11 @@ function App() {
       let chunkCount = 0;
       let lastChunkTime = Date.now();
 
-      // Обработка потокового ответа (собираем весь ответ)
+      // Обработка потокового ответа
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
 
-      console.log('App: Начинаем чтение потокового ответа от Ollama');
+      console.log('App: Начинаем чтение потокового ответа');
 
       while (true) {
         const { done, value } = await reader.read();
@@ -585,78 +612,81 @@ function App() {
         const chunk = decoder.decode(value);
         const lines = chunk.split('\n');
 
-        console.log(`App: Получен чанк ${chunkCount}, размер: ${chunk.length} байт`);
-
         for (const line of lines) {
-          // Ollama использует NDJSON формат, каждая строка - отдельный JSON объект
-          if (line.trim()) {
+          if (!line.trim()) continue;
+          
+          // Обработка Server-Sent Events (SSE) формата
+          if (line.startsWith('data: ')) {
+            try {
+              const jsonStr = line.substring(6); // Убираем "data: "
+              const data = JSON.parse(jsonStr);
+              
+              // Обработка контента
+              if (data.content) {
+                fullResponse += data.content;
+                setAiResponse(fullResponse);
+              }
+              
+              // Обработка метаданных поиска
+              if (data.search_metadata) {
+                setIsSearching(false);
+                if (data.search_metadata.sources && data.search_metadata.sources.length > 0) {
+                  setSearchSources(data.search_metadata.sources);
+                }
+              }
+              
+              // Завершение
+              if (data.done) {
+                console.log('App: Получен флаг done');
+                break;
+              }
+              
+              // Ошибки
+              if (data.error) {
+                console.error('App: Ошибка в ответе:', data.error);
+                throw new Error(data.error);
+              }
+            } catch (e) {
+              console.error('App: Ошибка парсинга JSON:', line, e);
+            }
+          } else if (useWebSearch === false) {
+            // Старый формат Ollama (NDJSON) - только если поиск выключен
             try {
               const data = JSON.parse(line);
               
               if (data.message && data.message.content) {
                 fullResponse += data.message.content;
-                console.log(`App: Добавлен контент, общая длина ответа: ${fullResponse.length}`);
+                setAiResponse(fullResponse);
               }
               
               if (data.done) {
-                console.log('App: Получен флаг done, завершаем чтение');
                 break;
               }
 
-              // Проверяем на ошибки в ответе
               if (data.error) {
-                console.error('App: Ошибка в ответе Ollama:', data.error);
                 throw new Error(`Ollama error: ${data.error}`);
               }
             } catch (e) {
               console.error('App: Ошибка парсинга JSON строки:', line, e);
-              // Не прерываем выполнение при ошибке парсинга одной строки
             }
           }
         }
 
-        // Проверяем таймаут между чанками (если нет данных более 30 секунд)
+        // Проверяем таймаут между чанками
         if (Date.now() - lastChunkTime > 30000) {
-          console.error('App: Таймаут при чтении потока - нет данных более 30 секунд');
+          console.error('App: Таймаут при чтении потока');
           throw new Error('Timeout: No data received for 30 seconds');
         }
       }
+      
+      setIsSearching(false);
 
       console.log(`App: Завершено чтение потока. Итоговый ответ: ${fullResponse.length} символов`);
-      
-
-      // Сохраняем сообщения в базу данных
-      const saveMessagesToDB = async (userMsg, assistantMsg) => {
-        try {
-          const token = localStorage.getItem('token');
-          
-          // Сохраняем сообщение пользователя
-          await fetch(`/api/chats/${chatId}/messages`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': `Bearer ${token}`
-            },
-            body: JSON.stringify(userMsg)
-          });
-
-          // Сохраняем ответ ассистента
-          await fetch(`/api/chats/${chatId}/messages`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': `Bearer ${token}`
-            },
-            body: JSON.stringify(assistantMsg)
-          });
-        } catch (error) {
-        }
-      };
 
       // Проверяем, что получили непустой ответ
       if (!fullResponse.trim()) {
-        console.error('App: Получен пустой ответ от Ollama');
-        throw new Error('Empty response from Ollama');
+        console.error('App: Получен пустой ответ');
+        throw new Error('Empty response');
       }
 
       // Останавливаем загрузку и сбрасываем счетчик попыток
@@ -668,16 +698,18 @@ function App() {
         inputRef.current?.focus();
       }, 100);
       
-      // Добавляем финальное сообщение в массив и сохраняем в базу данных
+      // Добавляем финальное сообщение в массив
+      // Сообщения уже сохранены в БД бэкендом
       if (!isStopping) {
-        const assistantMessage = { role: 'assistant', content: fullResponse };
+        const assistantMessage = { 
+          role: 'assistant', 
+          content: fullResponse,
+          sources: searchSources.length > 0 ? searchSources : undefined
+        };
         const finalMessages = [...newMessages, assistantMessage];
         
         // Добавляем сообщение в массив
         setMessages(finalMessages);
-        
-        // Сохраняем в базу данных
-        await saveMessagesToDB(userMessage, assistantMessage);
         
         // Обновляем чат с ответом и последним сообщением
         setChats(prev => prev.map(chat => {
@@ -695,14 +727,15 @@ function App() {
       } else {
         // Если была остановка, добавляем частичный ответ
         if (fullResponse.trim()) {
-          const assistantMessage = { role: 'assistant', content: fullResponse + '\n\n[Генерация остановлена пользователем]' };
+          const assistantMessage = { 
+            role: 'assistant', 
+            content: fullResponse + '\n\n[Генерация остановлена пользователем]',
+            sources: searchSources.length > 0 ? searchSources : undefined
+          };
           const finalMessages = [...newMessages, assistantMessage];
           
           // Добавляем сообщение в массив
           setMessages(finalMessages);
-          
-          // Сохраняем в базу данных
-          await saveMessagesToDB(userMessage, assistantMessage);
           
           setChats(prev => prev.map(chat => {
             if (chat.id === chatId) {
@@ -718,6 +751,9 @@ function App() {
           }));
         }
       }
+      
+      // Очищаем источники для следующего запроса
+      setSearchSources([]);
       
       // Очищаем временный ответ ИИ, так как он теперь в массиве messages
       setAiResponse('');
@@ -835,6 +871,56 @@ function App() {
     const textarea = e.target;
     textarea.style.height = 'auto';
     textarea.style.height = Math.min(textarea.scrollHeight, 200) + 'px';
+  };
+
+  const generateImage = async () => {
+    if (!inputMessage.trim() || isGeneratingImage || isLoading) return;
+    
+    if (!currentChatId) {
+      alert('Пожалуйста, выберите или создайте чат перед генерацией изображения');
+      return;
+    }
+
+    setIsGeneratingImage(true);
+    
+    try {
+      const token = localStorage.getItem('token');
+      const response = await fetch('/api/image/generate', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          chat_id: currentChatId,
+          description: inputMessage.trim()
+        })
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({ detail: 'Ошибка генерации изображения' }));
+        throw new Error(errorData.detail || `HTTP error! status: ${response.status}`);
+      }
+
+      const result = await response.json();
+      
+      // Очищаем поле ввода
+      setInputMessage('');
+      
+      // Перезагружаем сообщения чата для отображения нового изображения
+      await loadChatMessages(currentChatId);
+      
+      // Прокручиваем вниз
+      setTimeout(() => {
+        scrollToBottom();
+      }, 100);
+      
+    } catch (error) {
+      console.error('Ошибка генерации изображения:', error);
+      alert(`Ошибка генерации изображения: ${error.message}`);
+    } finally {
+      setIsGeneratingImage(false);
+    }
   };
 
   // Функция для сброса высоты textarea к исходному состоянию
@@ -1060,11 +1146,85 @@ function App() {
                       )}
                     </span>
                   </div>
+                ) : message.message_type === 'image' && message.image_url ? (
+                  <div className="message-content image-message">
+                    <div className="image-preview-container">
+                      <img 
+                        src={message.image_url} 
+                        alt={message.content || "Сгенерированное изображение"}
+                        className="generated-image"
+                        loading="lazy"
+                      />
+                      {message.image_metadata && (
+                        <div className="image-metadata">
+                          <details className="image-prompt-details">
+                            <summary>Промпты</summary>
+                            <div className="prompt-info">
+                              <div className="prompt-section">
+                                <strong>Positive:</strong>
+                                <p>{message.image_metadata.prompt_positive || 'N/A'}</p>
+                              </div>
+                              <div className="prompt-section">
+                                <strong>Negative:</strong>
+                                <p>{message.image_metadata.prompt_negative || 'N/A'}</p>
+                              </div>
+                            </div>
+                          </details>
+                        </div>
+                      )}
+                    </div>
+                    {message.content && (
+                      <div className="message-text">
+                        <MarkdownRenderer content={message.content} />
+                      </div>
+                    )}
+                  </div>
                 ) : (
                   <>
                     <div className="message-content">
                       <MarkdownRenderer content={message.content} />
                     </div>
+                    {message.sources && message.sources.length > 0 && (
+                      <div className="sources-container">
+                        <div className="sources-header">
+                          <RiSearchLine style={{fontSize: '14px', marginRight: '6px'}} />
+                          <span>Источники</span>
+                        </div>
+                        <div className="sources-list">
+                          {message.sources.map((source, idx) => {
+                            try {
+                              const url = new URL(source);
+                              const domain = url.hostname.replace('www.', '');
+                              return (
+                                <a
+                                  key={idx}
+                                  href={source}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="source-link"
+                                  title={source}
+                                >
+                                  {domain}
+                                </a>
+                              );
+                            } catch {
+                              return (
+                                <a
+                                  key={idx}
+                                  href={source}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="source-link"
+                                  title={source}
+                                >
+                                  {source.length > 40 ? source.substring(0, 40) + '...' : source}
+                                </a>
+                              );
+                            }
+                          })}
+                        </div>
+                      </div>
+                    )}
                     <button
                       className="copy-button"
                       onClick={() => copyToClipboard(message.content, index)}
@@ -1100,6 +1260,30 @@ function App() {
             rows="1"
             disabled={isLoading}
           />
+          <button
+            onClick={() => setUseWebSearch(!useWebSearch)}
+            disabled={isLoading || isGeneratingImage}
+            className={`search-toggle-button ${useWebSearch ? 'active' : ''}`}
+            title="Поиск в интернете"
+          >
+            {isSearching ? (
+              <RiLoader4Line className="spin" style={{fontSize: '18px'}} />
+            ) : (
+              <RiSearchLine style={{fontSize: '18px'}} />
+            )}
+          </button>
+          <button
+            onClick={generateImage}
+            disabled={isLoading || isGeneratingImage || !inputMessage.trim()}
+            className={`image-generate-button ${isGeneratingImage ? 'active' : ''}`}
+            title="Генерировать изображение"
+          >
+            {isGeneratingImage ? (
+              <RiLoader4Line className="spin" style={{fontSize: '18px'}} />
+            ) : (
+              <RiImageAddLine style={{fontSize: '18px'}} />
+            )}
+          </button>
           <button 
             onClick={isLoading ? stopGeneration : sendMessage} 
             className="send-button"
