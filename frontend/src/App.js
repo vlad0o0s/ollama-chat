@@ -25,7 +25,16 @@ import {
   RiPauseFill,
   RiUserLine,
   RiFileCopyLine,
-  RiCheckLine
+  RiCheckLine,
+  RiImageLine,
+  RiImageAddLine,
+  RiDownloadLine,
+  RiArrowDownSLine,
+  RiArrowUpSLine,
+  RiImage2Line,
+  RiPencilLine,
+  RiCheckLine as RiCheckLineIcon,
+  RiCloseLine as RiCloseLineIcon
 } from 'react-icons/ri';
 
 function App() {
@@ -50,9 +59,13 @@ function App() {
   const [chats, setChats] = useState([]);
   const [currentChatId, setCurrentChatId] = useState(null);
   const [searchQuery, setSearchQuery] = useState('');
-  const [useWebSearch, setUseWebSearch] = useState(true); // Включен по умолчанию
+  const [useWebSearch, setUseWebSearch] = useState(false); // Выключен по умолчанию
   const [isSearching, setIsSearching] = useState(false);
   const [searchSources, setSearchSources] = useState([]);
+  const [isImageMode, setIsImageMode] = useState(false); // Переключатель режима изображения
+  const [imageAspectRatio, setImageAspectRatio] = useState('1:1'); // Соотношение сторон изображения
+  const [imageGenerationStatus, setImageGenerationStatus] = useState(null); // Статус генерации изображения
+  const [lightboxImage, setLightboxImage] = useState(null); // Изображение для лайтбокса
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [showSettings, setShowSettings] = useState(false);
   const [showAuth, setShowAuth] = useState(false);
@@ -64,14 +77,39 @@ function App() {
   const [retryAttempt, setRetryAttempt] = useState(0);
   const [connectionCheckInterval, setConnectionCheckInterval] = useState(null);
   const [copiedMessages, setCopiedMessages] = useState(new Set());
+  const [showPlusMenu, setShowPlusMenu] = useState(false);
+  const [imageForCreation, setImageForCreation] = useState(null); // Загруженное изображение для создания
+  const [editingMessageId, setEditingMessageId] = useState(null); // ID редактируемого сообщения
+  const [editingContent, setEditingContent] = useState(''); // Содержимое редактируемого сообщения
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
+  const plusMenuRef = useRef(null);
+  const imageCreationFileInputRef = useRef(null); // For image creation specific upload
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   };
 
   // Функция копирования текста в буфер обмена с поддержкой HTML
+  const downloadImage = async (imageUrl, filename) => {
+    try {
+      const response = await fetch(imageUrl);
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename || 'image.png';
+      document.body.appendChild(a);
+      a.click();
+      window.URL.revokeObjectURL(url);
+      document.body.removeChild(a);
+    } catch (err) {
+      console.error('Ошибка скачивания изображения:', err);
+      // Fallback - открываем в новой вкладке
+      window.open(imageUrl, '_blank');
+    }
+  };
+
   const copyToClipboard = async (text, messageIndex) => {
     try {
       // Проверяем, поддерживает ли браузер Clipboard API
@@ -147,6 +185,26 @@ function App() {
   useEffect(() => {
     scrollToBottom();
   }, [messages]);
+
+  // Обработка ESC для закрытия лайтбокса
+  useEffect(() => {
+    const handleEscape = (e) => {
+      if (e.key === 'Escape' && lightboxImage) {
+        setLightboxImage(null);
+      }
+    };
+    
+    if (lightboxImage) {
+      document.addEventListener('keydown', handleEscape);
+      // Блокируем скролл страницы при открытом лайтбоксе
+      document.body.style.overflow = 'hidden';
+    }
+    
+    return () => {
+      document.removeEventListener('keydown', handleEscape);
+      document.body.style.overflow = '';
+    };
+  }, [lightboxImage]);
 
   // Функция для генерации возможных IP адресов
   const generatePossibleUrls = () => {
@@ -397,6 +455,12 @@ function App() {
 
   const sendMessage = async (retryCount = 0) => {
     if (!inputMessage.trim() || isLoading) return;
+    
+    // Если включен режим изображения, используем генерацию изображения
+    if (isImageMode) {
+      await generateImage();
+      return;
+    }
 
     // Проверяем соединение с Ollama перед отправкой
     const isConnected = await checkOllamaConnection();
@@ -563,20 +627,28 @@ function App() {
         });
       } else {
         // Используем прямой запрос к Ollama (старый способ)
+        // Фильтруем удаленные сообщения и формируем массив для Ollama
+        const messagesForOllama = newMessages
+          .filter(msg => !msg.deleted && msg.role && msg.content)
+          .map(msg => ({
+            role: msg.role,
+            content: msg.content
+          }));
+        
         response = await fetch(`${ollamaUrl}/api/chat`, {
-          method: 'POST',
-          mode: 'cors',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            model: model,
-            messages: newMessages,
-            stream: true
-          }),
-          signal: controller.signal,
+        method: 'POST',
+        mode: 'cors',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: model,
+          messages: messagesForOllama,
+          stream: true
+        }),
+        signal: controller.signal,
           timeout: 300000
-        });
+      });
       }
 
       const endTime = Date.now();
@@ -870,6 +942,417 @@ function App() {
     textarea.style.height = Math.min(textarea.scrollHeight, 200) + 'px';
   };
 
+  // Обработчик выбора файла для создания изображения
+  const handleFileSelectForCreation = (e) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      if (!file.type.startsWith('image/')) {
+        alert('Пожалуйста, выберите файл изображения');
+        return;
+      }
+      if (file.size > 10 * 1024 * 1024) {
+        alert('Файл слишком большой. Максимальный размер: 10MB');
+        return;
+      }
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        setImageForCreation({
+          file: file,
+          url: event.target.result,
+          name: file.name
+        });
+      };
+      reader.readAsDataURL(file);
+    }
+    // Сбрасываем значение input
+    if (imageCreationFileInputRef.current) {
+      imageCreationFileInputRef.current.value = '';
+    }
+  };
+
+  // Обработчики меню "+"
+  const handlePlusMenuToggle = () => {
+    setShowPlusMenu(!showPlusMenu);
+  };
+
+  const handleMenuOptionClick = (option) => {
+    setShowPlusMenu(false);
+    
+    switch(option) {
+      case 'createImage':
+        if (isImageMode) {
+          // Если режим уже включен, выключаем его и очищаем изображение
+          setIsImageMode(false);
+          setImageForCreation(null);
+        } else {
+          // Отключаем поиск при включении режима создания изображения
+          if (useWebSearch) {
+            setUseWebSearch(false);
+          }
+          setIsImageMode(true);
+          // Если есть последнее изображение пользователя в чате, используем его
+          if (currentChatId && messages.length > 0) {
+            const lastUserImage = [...messages].reverse().find(
+              msg => msg.role === 'user' && msg.message_type === 'image' && msg.image_url
+            );
+            if (lastUserImage) {
+              // Загружаем изображение из URL для превью
+              fetch(lastUserImage.image_url)
+                .then(res => res.blob())
+                .then(blob => {
+                  const reader = new FileReader();
+                  reader.onload = (event) => {
+                    setImageForCreation({
+                      file: new File([blob], 'image.png', { type: blob.type }),
+                      url: event.target.result,
+                      name: 'image.png'
+                    });
+                  };
+                  reader.readAsDataURL(blob);
+                })
+                .catch(err => console.error('Ошибка загрузки изображения:', err));
+            }
+          }
+        }
+        break;
+      case 'webSearch':
+        if (useWebSearch) {
+          setUseWebSearch(false);
+        } else {
+          // Отключаем режим создания изображения при включении поиска
+          if (isImageMode) {
+            setIsImageMode(false);
+            setImageForCreation(null);
+          }
+          setUseWebSearch(true);
+        }
+        break;
+      default:
+        break;
+    }
+  };
+
+  // Закрытие меню при клике вне его
+  useEffect(() => {
+    const handleClickOutside = (event) => {
+      if (plusMenuRef.current && !plusMenuRef.current.contains(event.target)) {
+        setShowPlusMenu(false);
+      }
+    };
+
+    if (showPlusMenu) {
+      document.addEventListener('mousedown', handleClickOutside);
+    }
+
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [showPlusMenu]);
+
+  // Удаление изображения для создания
+  const handleRemoveImageForCreation = () => {
+    setImageForCreation(null);
+  };
+
+  // Удаление сообщения
+  const handleDeleteMessage = async (messageId) => {
+    if (!currentChatId || !messageId) return;
+    
+    if (!window.confirm('Вы уверены, что хотите удалить это сообщение?')) {
+      return;
+    }
+
+    try {
+      const token = localStorage.getItem('token');
+      const response = await fetch(`/api/chats/${currentChatId}/messages/${messageId}`, {
+        method: 'DELETE',
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
+      });
+
+      if (response.ok) {
+        // Удаляем сообщение из локального состояния
+        setMessages(prev => prev.filter(msg => msg.id !== messageId));
+        // Перезагружаем сообщения из БД
+        await loadChatMessages(currentChatId);
+      } else {
+        const error = await response.json();
+        alert(error.detail || 'Ошибка удаления сообщения');
+      }
+    } catch (error) {
+      console.error('Ошибка удаления сообщения:', error);
+      alert('Ошибка сети при удалении сообщения');
+    }
+  };
+
+  // Начало редактирования сообщения
+  const handleStartEdit = (message) => {
+    if (message.role !== 'user' || !message.id) return;
+    setEditingMessageId(message.id);
+    setEditingContent(message.content);
+  };
+
+  // Отмена редактирования
+  const handleCancelEdit = () => {
+    setEditingMessageId(null);
+    setEditingContent('');
+  };
+
+  // Сохранение отредактированного сообщения
+  const handleSaveEdit = async (messageId) => {
+    if (!currentChatId || !messageId || !editingContent.trim()) return;
+
+    try {
+      const token = localStorage.getItem('token');
+      const response = await fetch(`/api/chats/${currentChatId}/messages/${messageId}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          content: editingContent.trim()
+        })
+      });
+
+      if (response.ok) {
+        const updatedMessage = await response.json();
+        // Обновляем сообщение в локальном состоянии
+        setMessages(prev => prev.map(msg => 
+          msg.id === messageId ? { ...msg, ...updatedMessage } : msg
+        ));
+        setEditingMessageId(null);
+        setEditingContent('');
+        // Перезагружаем сообщения из БД для получения актуальных данных
+        await loadChatMessages(currentChatId);
+      } else {
+        const error = await response.json();
+        alert(error.detail || 'Ошибка редактирования сообщения');
+      }
+    } catch (error) {
+      console.error('Ошибка редактирования сообщения:', error);
+      alert('Ошибка сети при редактировании сообщения');
+    }
+  };
+
+  const generateImage = async () => {
+    if (!inputMessage.trim() || isLoading) return;
+    
+    if (!currentChatId) {
+      alert('Пожалуйста, выберите или создайте чат перед генерацией изображения');
+      return;
+    }
+
+    setIsLoading(true);
+    
+    // Если есть изображение для создания, загружаем его на сервер вместе с описанием
+    // Это создаст одно сообщение с изображением и текстом
+    let referenceImageId = null;
+    if (imageForCreation) {
+      try {
+        const token = localStorage.getItem('token');
+        const formData = new FormData();
+        formData.append('file', imageForCreation.file);
+        formData.append('chat_id', currentChatId);
+        // Добавляем описание в сообщение с изображением
+        if (inputMessage.trim()) {
+          formData.append('description', inputMessage.trim());
+        }
+
+        const uploadResponse = await fetch('/api/image/upload', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${token}`
+          },
+          body: formData
+        });
+
+        if (uploadResponse.ok) {
+          const uploadResult = await uploadResponse.json();
+          referenceImageId = uploadResult.message_id;
+          // Перезагружаем сообщения чтобы получить актуальные данные
+          await loadChatMessages(currentChatId);
+        } else {
+          console.error('Ошибка загрузки изображения для создания');
+        }
+      } catch (error) {
+        console.error('Ошибка при загрузке изображения:', error);
+      }
+    }
+    
+    // Вычисляем размеры изображения на основе выбранного соотношения сторон
+    const getImageDimensions = (aspectRatio) => {
+      const baseSize = 1024; // Базовый размер
+      switch (aspectRatio) {
+        case '9:16': // Вертикальное
+          return { width: 576, height: 1024 };
+        case '16:9': // Горизонтальное
+          return { width: 1024, height: 576 };
+        case '1:1': // Квадратное
+          return { width: 1024, height: 1024 };
+        case '3:4': // Портретное
+          return { width: 768, height: 1024 };
+        case '4:3': // Альбомное
+          return { width: 1024, height: 768 };
+        default:
+          return { width: 1024, height: 1024 };
+      }
+    };
+
+    const dimensions = getImageDimensions(imageAspectRatio);
+    
+    // Добавляем временное сообщение для отображения плейсхолдера
+    const tempMessage = { 
+      role: 'assistant', 
+      content: '',
+      message_type: 'image_generating',
+      status: 'generating',
+      aspect_ratio: imageAspectRatio,
+      width: dimensions.width,
+      height: dimensions.height
+    };
+      setMessages(prev => [...prev, tempMessage]);
+    
+    // Сбрасываем загруженное изображение после отправки запроса
+    setImageForCreation(null);
+    
+    try {
+      const token = localStorage.getItem('token');
+      // Вычисляем размеры изображения на основе выбранного соотношения сторон
+      const getImageDimensions = (aspectRatio) => {
+        const baseSize = 1024; // Базовый размер
+        switch (aspectRatio) {
+          case '9:16': // Вертикальное
+            return { width: 576, height: 1024 };
+          case '16:9': // Горизонтальное
+            return { width: 1024, height: 576 };
+          case '1:1': // Квадратное
+            return { width: 1024, height: 1024 };
+          case '3:4': // Портретное
+            return { width: 768, height: 1024 };
+          case '4:3': // Альбомное
+            return { width: 1024, height: 768 };
+          default:
+            return { width: 1024, height: 1024 };
+        }
+      };
+
+      const dimensions = getImageDimensions(imageAspectRatio);
+
+      const response = await fetch('/api/image/generate/stream', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          chat_id: currentChatId,
+          description: inputMessage.trim(),
+          width: dimensions.width,
+          height: dimensions.height,
+          reference_image_id: referenceImageId || null
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            try {
+              const data = JSON.parse(line.slice(6));
+              
+              if (data.error) {
+                setImageGenerationStatus({ stage: 'error', message: data.error });
+                setMessages(prev => {
+                  const updated = [...prev];
+                  const lastIndex = updated.length - 1;
+                  if (updated[lastIndex]?.message_type === 'image_generating') {
+                    updated[lastIndex] = {
+                      role: 'assistant',
+                      content: `Ошибка: ${data.error}`,
+                      message_type: 'text'
+                    };
+                  }
+                  return updated;
+                });
+                break;
+              }
+              
+              if (data.stage) {
+                setImageGenerationStatus({ stage: data.stage, message: data.message });
+                // Обновляем статус, но не меняем отображение (плейсхолдер остается)
+                setMessages(prev => {
+                  const updated = [...prev];
+                  const lastIndex = updated.length - 1;
+                  if (updated[lastIndex]?.message_type === 'image_generating') {
+                    updated[lastIndex] = {
+                      ...updated[lastIndex],
+                      status: data.stage
+                    };
+                  }
+                  return updated;
+                });
+              }
+              
+              if (data.done && data.success) {
+                // Очищаем поле ввода
+                setInputMessage('');
+                
+                // Перезагружаем сообщения чата для отображения нового изображения
+                await loadChatMessages(currentChatId);
+                
+                // Прокручиваем вниз
+                setTimeout(() => {
+                  scrollToBottom();
+                }, 100);
+                
+                setImageGenerationStatus(null);
+              }
+            } catch (e) {
+              console.error('Ошибка парсинга SSE данных:', e);
+            }
+          }
+        }
+      }
+      
+    } catch (error) {
+      console.error('Ошибка генерации изображения:', error);
+      setImageGenerationStatus({ stage: 'error', message: error.message });
+      setMessages(prev => {
+        const updated = [...prev];
+        const lastIndex = updated.length - 1;
+        if (updated[lastIndex]?.message_type === 'image_generating') {
+          updated[lastIndex] = {
+            role: 'assistant',
+            content: `Ошибка генерации изображения: ${error.message}`,
+            message_type: 'text'
+          };
+        }
+        return updated;
+      });
+    } finally {
+      setIsLoading(false);
+      setImageGenerationStatus(null);
+      // Очищаем изображение для создания после генерации
+      setImageForCreation(null);
+    }
+  };
+
   // Функция для сброса высоты textarea к исходному состоянию
   const resetTextareaHeight = () => {
     if (inputRef.current) {
@@ -1076,7 +1559,85 @@ function App() {
             retryAttempt: retryAttempt
           }] : [])].map((message, index) => (
             <div key={index} className={`message ${message.role}`}>
-              {message.role === 'assistant' ? (
+              {message.role === 'user' ? (
+                <div className="message-wrapper-user">
+                  {editingMessageId === message.id ? (
+                    <div className="message-edit-container">
+                      <textarea
+                        className="message-edit-textarea"
+                        value={editingContent}
+                        onChange={(e) => setEditingContent(e.target.value)}
+                        autoFocus
+                        rows={3}
+                      />
+                      <div className="message-edit-actions">
+                        <button
+                          className="message-edit-save"
+                          onClick={() => handleSaveEdit(message.id)}
+                          title="Сохранить"
+                        >
+                          <RiCheckLineIcon />
+                        </button>
+                        <button
+                          className="message-edit-cancel"
+                          onClick={handleCancelEdit}
+                          title="Отменить"
+                        >
+                          <RiCloseLineIcon />
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <>
+                      {message.message_type === 'image' && message.image_url ? (
+                        <div className="message-content user-image-message">
+                          <div className="user-image-preview-container">
+                            <img 
+                              src={message.image_url} 
+                              alt={message.content || "Загруженное изображение"}
+                              className="user-uploaded-image"
+                              loading="lazy"
+                              onClick={() => setLightboxImage(message.image_url)}
+                            />
+                          </div>
+                          {message.content && message.content.trim() && (
+                            <div className="message-text">
+                              <MarkdownRenderer content={message.content} />
+                            </div>
+                          )}
+                        </div>
+                      ) : (
+                        <div className="message-content">
+                          <MarkdownRenderer content={message.content} />
+                          {message.edited && (
+                            <span className="message-edited-indicator" title={`Отредактировано ${message.edited_at ? new Date(message.edited_at).toLocaleString('ru-RU') : ''}`}>
+                              (изменено)
+                            </span>
+                          )}
+                        </div>
+                      )}
+                      {message.id && (
+                        <div className="message-actions">
+                          <button
+                            className="message-action-button message-edit-button"
+                            onClick={() => handleStartEdit(message)}
+                            title="Редактировать"
+                          >
+                            <RiPencilLine />
+                          </button>
+                          <button
+                            className="message-action-button message-delete-button"
+                            onClick={() => handleDeleteMessage(message.id)}
+                            title="Удалить"
+                          >
+                            <RiDeleteBin6Line />
+                          </button>
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              ) : message.role === 'assistant' ? (
                 message.isTyping ? (
                   <div className="typing-indicator">
                     <div className="glass-typing-dots">
@@ -1092,6 +1653,77 @@ function App() {
                         </span>
                       )}
                     </span>
+                  </div>
+                ) : message.message_type === 'image_generating' ? (
+                  <div className="message-content image-message">
+                    <div className="image-preview-container">
+                      <div 
+                        className="image-generating-placeholder"
+                        style={{
+                          aspectRatio: message.aspect_ratio ? message.aspect_ratio.replace(':', '/') : '1/1',
+                          maxWidth: message.width ? `${Math.min(message.width, 1024)}px` : '1024px',
+                          maxHeight: message.height ? `${Math.min(message.height, 1024)}px` : '1024px'
+                        }}
+                      >
+                        <div className="generating-image-blur">
+                          <div className="generating-noise"></div>
+                        </div>
+                        {message.status === 'error' && (
+                          <div className="generating-error-overlay">
+                            <div className="generating-error-text">Ошибка генерации</div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                ) : message.message_type === 'image' && message.image_url ? (
+                  <div className="message-content image-message">
+                    <div className="image-preview-container">
+                      <img 
+                        src={message.image_url} 
+                        alt={message.content || "Сгенерированное изображение"}
+                        className="generated-image"
+                        loading="lazy"
+                        onClick={() => setLightboxImage(message.image_url)}
+                      />
+                      <div className="image-actions">
+                        <button
+                          className="image-action-button download-image-button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            downloadImage(message.image_url, message.image_metadata?.filename || 'image.png');
+                          }}
+                          title="Скачать изображение"
+                        >
+                          <RiDownloadLine className="action-icon" />
+                        </button>
+                      </div>
+                      {message.image_metadata && (
+                        <div className="image-metadata">
+                          <details className="image-prompt-details">
+                            <summary>
+                              <span>Промпты</span>
+                              <RiArrowDownSLine className="details-icon" />
+                            </summary>
+                            <div className="prompt-info">
+                              <div className="prompt-section">
+                                <strong>Positive:</strong>
+                                <p>{message.image_metadata.prompt_positive || 'N/A'}</p>
+                              </div>
+                              <div className="prompt-section">
+                                <strong>Negative:</strong>
+                                <p>{message.image_metadata.prompt_negative || 'N/A'}</p>
+                              </div>
+                            </div>
+                          </details>
+                        </div>
+                      )}
+                    </div>
+                    {message.content && message.content.trim() && (
+                      <div className="message-text">
+                        <MarkdownRenderer content={message.content} />
+                      </div>
+                    )}
                   </div>
                 ) : (
                   <>
@@ -1163,29 +1795,157 @@ function App() {
           <div ref={messagesEndRef} />
         </div>
 
+        {/* Кнопки активных режимов */}
+        <div className="active-modes-buttons">
+          {isImageMode && (
+            <button
+              onClick={() => {
+                setIsImageMode(false);
+                setImageForCreation(null);
+              }}
+              className="active-mode-button image-mode-button"
+              title="Отключить режим создания изображения"
+            >
+              <RiImage2Line className="active-mode-button-icon" />
+              <span>Создание изображения</span>
+              <RiCloseLine className="active-mode-button-close" />
+            </button>
+          )}
+          {useWebSearch && (
+            <button
+              onClick={() => setUseWebSearch(false)}
+              className="active-mode-button search-mode-button"
+              title="Отключить поиск в интернете"
+            >
+              <RiSearchLine className="active-mode-button-icon" />
+              <span>Поиск в интернете</span>
+              <RiCloseLine className="active-mode-button-close" />
+            </button>
+          )}
+        </div>
+
+        {isImageMode && (
+          <div className="image-creation-interface">
+            <div className="image-creation-content-compact">
+              {imageForCreation ? (
+                <div className="image-preview-wrapper-compact">
+                  <div className="image-preview-container-compact">
+                    <img 
+                      src={imageForCreation.url} 
+                      alt={imageForCreation.name}
+                      className="image-preview-compact"
+                    />
+                    <button
+                      className="image-preview-remove-compact"
+                      onClick={handleRemoveImageForCreation}
+                      title="Удалить изображение"
+                    >
+                      <RiCloseLine />
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <button
+                  onClick={() => imageCreationFileInputRef.current?.click()}
+                  className="image-upload-button-compact"
+                  title="Добавить изображение"
+                >
+                  <RiAddLine className="image-upload-icon-compact" />
+                  <RiImage2Line className="image-upload-icon-secondary-compact" />
+                  <span className="image-upload-text-compact">Изображение</span>
+                </button>
+              )}
+              {!imageForCreation && (
+                <div className="aspect-ratio-selector-compact">
+                  <div className="aspect-ratio-buttons-compact">
+                    <button
+                      onClick={() => setImageAspectRatio('9:16')}
+                      className={`aspect-ratio-button-compact ${imageAspectRatio === '9:16' ? 'active' : ''}`}
+                      title="Вертикальное (9:16)"
+                    >
+                      9:16
+                    </button>
+                    <button
+                      onClick={() => setImageAspectRatio('16:9')}
+                      className={`aspect-ratio-button-compact ${imageAspectRatio === '16:9' ? 'active' : ''}`}
+                      title="Горизонтальное (16:9)"
+                    >
+                      16:9
+                    </button>
+                    <button
+                      onClick={() => setImageAspectRatio('1:1')}
+                      className={`aspect-ratio-button-compact ${imageAspectRatio === '1:1' ? 'active' : ''}`}
+                      title="Квадратное (1:1)"
+                    >
+                      1:1
+                    </button>
+                    <button
+                      onClick={() => setImageAspectRatio('3:4')}
+                      className={`aspect-ratio-button-compact ${imageAspectRatio === '3:4' ? 'active' : ''}`}
+                      title="Портретное (3:4)"
+                    >
+                      3:4
+                    </button>
+                    <button
+                      onClick={() => setImageAspectRatio('4:3')}
+                      className={`aspect-ratio-button-compact ${imageAspectRatio === '4:3' ? 'active' : ''}`}
+                      title="Альбомное (4:3)"
+                    >
+                      4:3
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
         <div className="input-container">
+          <input
+            ref={imageCreationFileInputRef}
+            type="file"
+            accept="image/*"
+            onChange={handleFileSelectForCreation}
+            style={{ display: 'none' }}
+          />
+          <div className="plus-menu-wrapper" ref={plusMenuRef}>
+            <button
+              onClick={handlePlusMenuToggle}
+              disabled={isLoading}
+              className="plus-menu-button"
+              title="Дополнительные опции"
+            >
+              <RiAddLine style={{fontSize: '20px'}} />
+            </button>
+            {showPlusMenu && (
+              <div className="plus-menu">
+                <button
+                  onClick={() => handleMenuOptionClick('createImage')}
+                  className={`plus-menu-item ${isImageMode ? 'active' : ''}`}
+                >
+                  <RiImage2Line className="plus-menu-icon" />
+                  <span>Создать изображение</span>
+                </button>
+                <button
+                  onClick={() => handleMenuOptionClick('webSearch')}
+                  className={`plus-menu-item ${useWebSearch ? 'active' : ''}`}
+                >
+                  <RiSearchLine className="plus-menu-icon" />
+                  <span>Поиск в интернете</span>
+                </button>
+              </div>
+            )}
+          </div>
           <textarea
             ref={inputRef}
             value={inputMessage}
             onChange={handleInputChange}
             onKeyPress={handleKeyPress}
-            placeholder="Введите ваше сообщение..."
+            placeholder="Введите ваше сообщение... (или перетащите изображение сюда)"
             className="message-input"
             rows="1"
             disabled={isLoading}
           />
-          <button
-            onClick={() => setUseWebSearch(!useWebSearch)}
-            disabled={isLoading}
-            className={`search-toggle-button ${useWebSearch ? 'active' : ''}`}
-            title="Поиск в интернете"
-          >
-            {isSearching ? (
-              <RiLoader4Line className="spin" style={{fontSize: '18px'}} />
-            ) : (
-              <RiSearchLine style={{fontSize: '18px'}} />
-            )}
-          </button>
           <button 
             onClick={isLoading ? stopGeneration : sendMessage} 
             className="send-button"
@@ -1199,6 +1959,32 @@ function App() {
           </button>
         </div>
       </div>
+      
+      {/* Лайтбокс для просмотра изображений */}
+      {lightboxImage && (
+        <div 
+          className="lightbox-overlay"
+          onClick={() => setLightboxImage(null)}
+        >
+          <div 
+            className="lightbox-content"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              className="lightbox-close"
+              onClick={() => setLightboxImage(null)}
+              title="Закрыть"
+            >
+              <RiCloseLine className="lightbox-close-icon" />
+            </button>
+            <img 
+              src={lightboxImage} 
+              alt="Просмотр изображения"
+              className="lightbox-image"
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 }
