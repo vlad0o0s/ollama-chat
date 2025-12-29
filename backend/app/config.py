@@ -42,11 +42,27 @@ class Settings(BaseSettings):
     COMFYUI_MODEL: str = "flux1-dev-fp8"
     COMFYUI_TIMEOUT: int = 300  # секунд (5 минут)
     COMFYUI_RETRY_ATTEMPTS: int = 3
+    COMFYUI_WORKFLOW_PATH: str = r"C:\ComfyUI_windows_portable\ComfyUI\Flux.json"  # Путь к JSON workflow шаблону
     
     # Image Storage Configuration
     IMAGE_STORAGE_PATH: str = "static/images"
     IMAGE_DEFAULT_WIDTH: int = 1024
     IMAGE_DEFAULT_HEIGHT: int = 1024
+    
+    # GPU Resource Management
+    GPU_MONITOR_ENABLED: bool = True
+    GPU_MONITOR_INTERVAL: int = 2  # секунды между проверками
+    GPU_VRAM_THRESHOLD: int = 90  # процент использования VRAM для блокировки
+    GPU_MIN_FREE_VRAM_MB: int = 1024  # минимум свободной VRAM для новых задач (уменьшено, так как процессы переключаются)
+    GPU_WAIT_TIMEOUT: int = 300  # таймаут ожидания GPU (секунды)
+    GPU_PRIORITY_COMFYUI: int = 10  # приоритет ComfyUI (высший)
+    GPU_PRIORITY_OLLAMA: int = 5  # приоритет Ollama (средний)
+    
+    # Process Management API
+    PROCESS_MANAGER_API_URL: str = "http://localhost:8888"  # URL Process Management API (локальный сервер)
+    PROCESS_SWITCH_TIMEOUT: int = 30  # таймаут переключения процесса (секунды)
+    PROCESS_STARTUP_WAIT: int = 10  # время ожидания запуска процесса (секунды)
+    PROCESS_RESTORE_ON_RELEASE: bool = True  # восстанавливать процесс после освобождения
     
     class Config:
         env_file = ".env"

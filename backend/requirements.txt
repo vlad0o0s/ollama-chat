@@ -14,3 +14,4 @@ tavily-python>=0.3.0
 httpx>=0.25.0
 requests>=2.31.0
 aiofiles>=23.2.0
+pynvml>=11.5.0
