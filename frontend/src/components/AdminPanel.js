@@ -142,8 +142,8 @@ const AdminPanel = ({ onClose }) => {
   };
 
   return (
-    <div className="admin-panel-overlay">
-      <div className="admin-panel-card">
+    <div className="admin-panel-overlay" onClick={onClose}>
+      <div className="admin-panel-card" onClick={(e) => e.stopPropagation()}>
         <div className="admin-panel-header">
           <div className="admin-panel-title">
             <RiShieldUserLine className="admin-icon" />

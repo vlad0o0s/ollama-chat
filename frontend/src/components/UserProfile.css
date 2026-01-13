@@ -5,116 +5,149 @@
   left: 0;
   right: 0;
   bottom: 0;
-  background: rgba(0, 0, 0, 0.8);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  background: rgba(15, 15, 15, 0.6);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
   z-index: 2000;
-  padding: 20px;
+  animation: fadeIn 0.2s ease-out;
 }
 
-/* Карточка профиля */
+/* Панель профиля - выезжает справа */
 .user-profile-card {
-  background: #212121;
-  border: 1px solid #3d3d3d;
-  border-radius: 16px;
-  width: 100%;
-  max-width: 500px;
-  max-height: 90vh;
-  overflow-y: auto;
-  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.5);
-  animation: slideUp 0.3s ease-out;
+  position: fixed;
+  top: 0;
+  right: 0;
+  width: 420px;
+  max-width: 90vw;
+  height: 100vh;
+  background: var(--bg-secondary);
+  border-left: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  box-shadow: -4px 0 24px rgba(0, 0, 0, 0.4);
+  animation: slideInRight 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  z-index: 2001;
+  overflow: hidden;
+}
+
+@keyframes slideInRight {
+  from {
+    transform: translateX(100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
 }
 
 /* Заголовок профиля */
 .profile-header {
-  background: linear-gradient(135deg, #ff8c00, #e67e00);
-  color: white;
-  padding: 24px;
-  border-radius: 16px 16px 0 0;
+  background: var(--bg-secondary);
+  padding: 20px 24px;
+  border-bottom: 1px solid var(--border-subtle);
   display: flex;
   align-items: center;
   gap: 16px;
-  position: relative;
+  flex-shrink: 0;
 }
 
 .profile-avatar {
-  width: 60px;
-  height: 60px;
-  background: rgba(255, 255, 255, 0.2);
+  width: 48px;
+  height: 48px;
+  background: var(--accent-primary);
   border-radius: 50%;
   display: flex;
   align-items: center;
   justify-content: center;
   font-size: 24px;
-  backdrop-filter: blur(10px);
+  color: white;
+  flex-shrink: 0;
 }
 
 .profile-header h3 {
   margin: 0;
-  font-size: 24px;
-  font-weight: 600;
+  font-size: 18px;
+  font-weight: 500;
+  color: var(--text-primary);
   flex: 1;
 }
 
 .close-btn {
-  background: rgba(255, 255, 255, 0.2);
+  background: transparent;
   border: none;
-  border-radius: 50%;
-  width: 40px;
-  height: 40px;
+  border-radius: 8px;
+  width: 32px;
+  height: 32px;
   display: flex;
   align-items: center;
   justify-content: center;
-  color: white;
+  color: var(--text-secondary);
   font-size: 20px;
   cursor: pointer;
-  transition: background 0.3s ease;
-  backdrop-filter: blur(10px);
+  transition: all 0.2s ease;
+  padding: 0;
+  flex-shrink: 0;
 }
 
 .close-btn:hover {
-  background: rgba(255, 255, 255, 0.3);
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
 }
 
 /* Контент профиля */
 .profile-content {
+  flex: 1;
+  overflow-y: auto;
   padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
 }
 
 /* Информация профиля */
 .profile-info {
-  margin-bottom: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
 }
 
 .info-group {
-  margin-bottom: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
 .info-group label {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-weight: 600;
-  color: #ececec;
-  margin-bottom: 8px;
-  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
 }
 
 .label-icon {
   font-size: 16px;
-  color: #ff8c00;
+  color: var(--accent-primary);
 }
 
 .info-value {
   padding: 12px 16px;
-  background: #2d2d2d;
+  background: var(--bg-tertiary);
   border-radius: 8px;
-  color: #ececec;
-  font-size: 16px;
-  border: 1px solid #3d3d3d;
+  color: var(--text-primary);
+  font-size: 15px;
+  border: 1px solid var(--border-subtle);
 }
 
 .info-value-container {
@@ -129,53 +162,50 @@
 }
 
 .edit-name-btn {
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  color: #8e8ea0;
-  width: 28px;
-  height: 28px;
+  background: transparent;
+  border: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  width: 32px;
+  height: 32px;
   display: flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  border-radius: 4px;
+  border-radius: 6px;
   transition: all 0.2s ease;
-  font-size: 14px;
+  font-size: 16px;
   padding: 0;
-  margin: 0;
+  flex-shrink: 0;
 }
 
 .edit-name-btn:hover {
-  background: rgba(255, 140, 0, 0.1);
-  border-color: rgba(255, 140, 0, 0.3);
-  color: #ff8c00;
+  background: var(--bg-tertiary);
+  border-color: var(--accent-primary);
+  color: var(--accent-primary);
 }
 
 .edit-name-btn svg {
-  width: 14px;
-  height: 14px;
-  display: block;
-  margin: 0;
-  padding: 0;
+  width: 16px;
+  height: 16px;
 }
 
 .profile-input {
   width: 100%;
   padding: 12px 16px;
-  border: 2px solid #3d3d3d;
+  border: 1px solid var(--border-subtle);
   border-radius: 8px;
-  font-size: 16px;
-  background: #2d2d2d;
-  color: #ececec;
-  transition: border-color 0.3s ease;
+  font-size: 15px;
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  transition: all 0.2s ease;
   box-sizing: border-box;
+  font-family: inherit;
 }
 
 .profile-input:focus {
   outline: none;
-  border-color: #ff8c00;
-  background: #1a1a1a;
-  box-shadow: 0 0 0 3px rgba(255, 140, 0, 0.1);
+  border-color: var(--accent-primary);
+  box-shadow: 0 0 0 3px rgba(66, 133, 244, 0.1);
 }
 
 /* Действия профиля */
@@ -183,11 +213,9 @@
   display: flex;
   flex-direction: column;
   gap: 12px;
-}
-
-.edit-actions {
-  display: flex;
-  gap: 12px;
+  margin-top: auto;
+  padding-top: 24px;
+  border-top: 1px solid var(--border-subtle);
 }
 
 .user-profile-card .action-btn {
@@ -199,141 +227,89 @@
   border: none;
   border-radius: 8px;
   font-size: 14px;
-  font-weight: 600;
+  font-weight: 500;
   cursor: pointer;
-  transition: all 0.3s ease;
-  min-width: 120px;
-}
-
-.user-profile-card .action-btn.edit {
-  background: #ff8c00;
-  color: white;
-}
-
-.user-profile-card .action-btn.edit:hover {
-  background: #e67e00;
-  transform: translateY(-1px);
-}
-
-.user-profile-card .action-btn.save {
-  background: #28a745;
-  color: white;
-}
-
-.user-profile-card .action-btn.save:hover:not(:disabled) {
-  background: #218838;
-  transform: translateY(-1px);
-}
-
-.user-profile-card .action-btn.cancel {
-  background: #6c757d;
-  color: white;
-}
-
-.user-profile-card .action-btn.cancel:hover:not(:disabled) {
-  background: #5a6268;
-  transform: translateY(-1px);
+  transition: all 0.2s ease;
+  width: 100%;
+  font-family: inherit;
 }
 
 .user-profile-card .action-btn.logout {
-  background: #dc3545;
-  color: white;
-  margin-top: 12px;
+  background: transparent;
+  border: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
 }
 
 .user-profile-card .action-btn.logout:hover {
-  background: #c82333;
-  transform: translateY(-1px);
+  background: var(--bg-tertiary);
+  border-color: #ef4444;
+  color: #ef4444;
 }
 
 .user-profile-card .action-btn:disabled {
-  opacity: 0.6;
+  opacity: 0.5;
   cursor: not-allowed;
-  transform: none;
 }
 
 /* Сообщения */
 .error-message {
-  background: rgba(220, 53, 69, 0.1);
-  color: #ff6b6b;
+  background: rgba(239, 68, 68, 0.1);
+  color: #ef4444;
   padding: 12px 16px;
   border-radius: 8px;
-  border: 1px solid rgba(220, 53, 69, 0.3);
-  margin-bottom: 16px;
+  border: 1px solid rgba(239, 68, 68, 0.2);
   font-size: 14px;
 }
 
 .success-message {
-  background: rgba(40, 167, 69, 0.1);
-  color: #51cf66;
+  background: rgba(34, 197, 94, 0.1);
+  color: #22c55e;
   padding: 12px 16px;
   border-radius: 8px;
-  border: 1px solid rgba(40, 167, 69, 0.3);
-  margin-bottom: 16px;
+  border: 1px solid rgba(34, 197, 94, 0.2);
   font-size: 14px;
 }
 
-/* Анимация загрузки */
-.loading-icon {
-  animation: spin 1s linear infinite;
+/* Скроллбар */
+.profile-content::-webkit-scrollbar {
+  width: 6px;
 }
 
-@keyframes spin {
-  from {
-    transform: rotate(0deg);
-  }
-  to {
-    transform: rotate(360deg);
-  }
+.profile-content::-webkit-scrollbar-track {
+  background: transparent;
 }
 
-/* Анимация появления */
-@keyframes slideUp {
-  from {
-    opacity: 0;
-    transform: translateY(30px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
+.profile-content::-webkit-scrollbar-thumb {
+  background: var(--bg-tertiary);
+  border-radius: 3px;
+}
+
+.profile-content::-webkit-scrollbar-thumb:hover {
+  background: var(--border-subtle);
 }
 
 /* Адаптивность */
 @media (max-width: 600px) {
-  .user-profile-overlay {
-    padding: 10px;
-  }
-  
   .user-profile-card {
-    max-height: 95vh;
+    width: 100vw;
+    max-width: 100vw;
   }
   
   .profile-header {
-    padding: 20px;
+    padding: 16px 20px;
   }
   
   .profile-header h3 {
-    font-size: 20px;
+    font-size: 16px;
   }
   
   .profile-avatar {
-    width: 50px;
-    height: 50px;
+    width: 40px;
+    height: 40px;
     font-size: 20px;
   }
   
   .profile-content {
     padding: 20px;
-  }
-  
-  .edit-actions {
-    flex-direction: column;
-  }
-  
-  .user-profile-card .action-btn {
-    padding: 14px 20px;
-    font-size: 15px;
-    min-width: 100%;
   }
 }

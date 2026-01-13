@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { useAuth } from '../AuthContext';
 import {
   RiAddLine,
@@ -8,11 +8,16 @@ import {
   RiEditLine,
   RiCheckLine,
   RiCloseLine,
-  RiLoader4Line
+  RiLoader4Line,
+  RiMoreLine,
+  RiUserLine,
+  RiSettings3Line,
+  RiQuestionLine,
+  RiMenuLine
 } from 'react-icons/ri';
 import './ChatManager.css';
 
-const ChatManager = ({ onChatSelect, currentChatId, refreshTrigger, chats: externalChats, isHidden = false }) => {
+const ChatManager = ({ onChatSelect, currentChatId, refreshTrigger, chats: externalChats, isHidden = false, onToggleSidebar, onOpenProfile, onOpenSettings }) => {
   const { user } = useAuth();
   const [chats, setChats] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -20,6 +25,8 @@ const ChatManager = ({ onChatSelect, currentChatId, refreshTrigger, chats: exter
   const [editingChat, setEditingChat] = useState(null);
   const [editTitle, setEditTitle] = useState('');
   const [creatingChat, setCreatingChat] = useState(false);
+  const [hoveredChat, setHoveredChat] = useState(null);
+  const [openMenuChat, setOpenMenuChat] = useState(null);
 
   const loadChats = useCallback(async () => {
     try {
@@ -45,24 +52,37 @@ const ChatManager = ({ onChatSelect, currentChatId, refreshTrigger, chats: exter
     }
   }, []);
 
-  // Загрузка чатов при монтировании компонента
   useEffect(() => {
     loadChats();
   }, [loadChats]);
 
-  // Перезагрузка чатов при изменении refreshTrigger
   useEffect(() => {
     if (refreshTrigger > 0) {
       loadChats();
     }
   }, [refreshTrigger, loadChats]);
 
-  // Обновление чатов при изменении внешних чатов
   useEffect(() => {
     if (externalChats && externalChats.length > 0) {
       setChats(externalChats);
     }
   }, [externalChats]);
+
+  // Закрытие меню при клике вне его
+  useEffect(() => {
+    const handleClickOutside = (event) => {
+      if (openMenuChat && !event.target.closest('.chat-actions')) {
+        setOpenMenuChat(null);
+      }
+    };
+
+    if (openMenuChat) {
+      document.addEventListener('mousedown', handleClickOutside);
+      return () => {
+        document.removeEventListener('mousedown', handleClickOutside);
+      };
+    }
+  }, [openMenuChat]);
 
   const createNewChat = async () => {
     if (loading || creatingChat) {
@@ -71,16 +91,8 @@ const ChatManager = ({ onChatSelect, currentChatId, refreshTrigger, chats: exter
     
     setCreatingChat(true);
     
-    // Дополнительная защита - блокируем кнопку
-    const button = document.querySelector('.new-chat-btn');
-    if (button) {
-      button.disabled = true;
-    }
-    
     try {
       const token = localStorage.getItem('token');
-      
-      // Создаем новый чат (сервер сам удалит пустые чаты)
       const response = await fetch('/api/chats', {
         method: 'POST',
         headers: {
@@ -94,7 +106,6 @@ const ChatManager = ({ onChatSelect, currentChatId, refreshTrigger, chats: exter
 
       if (response.ok) {
         const newChat = await response.json();
-        // Перезагружаем список чатов, чтобы получить актуальное состояние
         await loadChats();
         onChatSelect(newChat.id);
       } else {
@@ -105,10 +116,6 @@ const ChatManager = ({ onChatSelect, currentChatId, refreshTrigger, chats: exter
       setError('Ошибка сети');
     } finally {
       setCreatingChat(false);
-      // Разблокируем кнопку
-      if (button) {
-        button.disabled = false;
-      }
     }
   };
 
@@ -208,65 +215,87 @@ const ChatManager = ({ onChatSelect, currentChatId, refreshTrigger, chats: exter
     setEditTitle('');
   };
 
-  const formatDate = (dateString) => {
-    const date = new Date(dateString);
+  // Группировка чатов по датам
+  const groupedChats = useMemo(() => {
     const now = new Date();
-    const diffTime = Math.abs(now - date);
-    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const yesterday = new Date(today);
+    yesterday.setDate(yesterday.getDate() - 1);
+    const thirtyDaysAgo = new Date(today);
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
 
-    if (diffDays === 1) {
-      return 'Сегодня';
-    } else if (diffDays === 2) {
-      return 'Вчера';
-    } else if (diffDays <= 7) {
-      return `${diffDays - 1} дн. назад`;
-    } else {
-      return date.toLocaleDateString('ru-RU');
+    const pinned = [];
+    const todayChats = [];
+    const yesterdayChats = [];
+    const recentChats = [];
+    const olderChats = [];
+
+    chats.forEach(chat => {
+      if (chat.pinned) {
+        pinned.push(chat);
+        return;
+      }
+
+      const chatDate = new Date(chat.last_message_at || chat.updated_at || chat.created_at);
+      const chatDateOnly = new Date(chatDate.getFullYear(), chatDate.getMonth(), chatDate.getDate());
+
+      if (chatDateOnly.getTime() === today.getTime()) {
+        todayChats.push(chat);
+      } else if (chatDateOnly.getTime() === yesterday.getTime()) {
+        yesterdayChats.push(chat);
+      } else if (chatDate >= thirtyDaysAgo) {
+        recentChats.push(chat);
+      } else {
+        olderChats.push(chat);
+      }
+    });
+
+    const groups = [];
+    if (pinned.length > 0) {
+      groups.push({ label: 'Закрепленные', chats: pinned });
     }
-  };
+    if (todayChats.length > 0) {
+      groups.push({ label: 'Сегодня', chats: todayChats });
+    }
+    if (yesterdayChats.length > 0) {
+      groups.push({ label: 'Вчера', chats: yesterdayChats });
+    }
+    if (recentChats.length > 0) {
+      groups.push({ label: 'Предыдущие 30 дней', chats: recentChats });
+    }
+    if (olderChats.length > 0) {
+      groups.push({ label: 'Ранее', chats: olderChats });
+    }
 
-  const truncateMessage = (message, maxLength = 20) => {
+    return groups;
+  }, [chats]);
+
+  const truncateMessage = (message, maxLength = 50) => {
     if (!message || message.length <= maxLength) {
       return message;
     }
-    
-    // Ищем подходящее место для обрезки (конец слова)
-    let truncated = message.slice(0, maxLength);
-    const lastSpace = truncated.lastIndexOf(' ');
-    
-    // Если есть подходящее место для обрезки по пробелу
-    if (lastSpace > maxLength * 0.7) {
-      truncated = truncated.slice(0, lastSpace);
-    }
-    
-    return truncated + '...';
+    return message.slice(0, maxLength) + '...';
   };
 
   if (loading) {
     return (
-      <div className="chat-manager">
+      <div className={`chat-manager ${isHidden ? 'hidden' : ''}`}>
         <div className="chat-manager-header">
-          <h3>
-            <RiChat3Line style={{ marginRight: '8px', color: '#8e8ea0' }} />
-            Чаты
-          </h3>
+          <button className="sidebar-toggle-btn" onClick={onToggleSidebar} title="Свернуть панель">
+            <RiCloseLine />
+          </button>
+          <button className="new-chat-btn-header" disabled>
+            <RiAddLine />
+            <span>Новый чат</span>
+          </button>
         </div>
         <div className="loading-chats">
           <div className="skeleton-chats-container">
-            {/* Скелетон элементы для чатов */}
             {[...Array(5)].map((_, index) => (
               <div key={index} className="skeleton-chat-item">
                 <div className="skeleton-chat-content">
                   <div className="skeleton-chat-title"></div>
-                  <div className="skeleton-chat-meta">
-                    <div className="skeleton-chat-message"></div>
-                    <div className="skeleton-chat-time"></div>
-                  </div>
-                </div>
-                <div className="skeleton-chat-actions">
-                  <div className="skeleton-action-btn"></div>
-                  <div className="skeleton-action-btn"></div>
-                  <div className="skeleton-action-btn"></div>
+                  <div className="skeleton-chat-message"></div>
                 </div>
               </div>
             ))}
@@ -278,22 +307,20 @@ const ChatManager = ({ onChatSelect, currentChatId, refreshTrigger, chats: exter
 
   return (
     <div className={`chat-manager ${isHidden ? 'hidden' : ''}`}>
+      {/* Header */}
       <div className="chat-manager-header">
-        <h3>
-          <RiChat3Line style={{ marginRight: '8px', color: '#8e8ea0' }} />
-          Чаты
-        </h3>
-        {loading || creatingChat ? (
-          <div className="skeleton-button" style={{width: '32px', height: '32px', borderRadius: '6px'}}></div>
-        ) : (
-          <button 
-            className="new-chat-btn"
-            onClick={createNewChat}
-            title="Создать новый чат"
-          >
-            <RiAddLine />
-          </button>
-        )}
+        <button className="sidebar-toggle-btn" onClick={onToggleSidebar} title="Свернуть панель">
+          <RiCloseLine />
+        </button>
+        <button 
+          className="new-chat-btn-header"
+          onClick={createNewChat}
+          disabled={creatingChat}
+          title="Создать новый чат"
+        >
+          <RiAddLine />
+          <span>Новый чат</span>
+        </button>
       </div>
 
       {error && (
@@ -303,105 +330,144 @@ const ChatManager = ({ onChatSelect, currentChatId, refreshTrigger, chats: exter
         </div>
       )}
 
-      <div className="chats-list">
-        {chats.length === 0 ? (
-          <div className="no-chats">
-            <RiChat3Line className="no-chats-icon" />
-            <p>У вас пока нет чатов</p>
-            <button className="create-first-chat" onClick={createNewChat}>
-              Создать первый чат
-            </button>
-          </div>
-        ) : (
-          chats.map(chat => (
-            <div 
-              key={chat.id} 
-              className={`chat-item ${currentChatId === chat.id ? 'active' : ''} ${Boolean(chat.pinned) ? 'pinned' : ''}`}
-              onClick={() => onChatSelect(chat.id)}
-            >
-              <div className="chat-content">
-                {editingChat === chat.id ? (
-                  <div className="edit-chat">
-                    <input
-                      type="text"
-                      value={editTitle}
-                      onChange={(e) => setEditTitle(e.target.value)}
-                      onKeyPress={(e) => e.key === 'Enter' && saveEdit(chat.id)}
-                      autoFocus
-                      className="edit-input"
-                    />
-                    <div className="edit-actions">
-                      <button 
-                        className="save-btn"
-                        onClick={() => saveEdit(chat.id)}
-                        title="Сохранить"
-                      >
-                        <RiCheckLine />
-                      </button>
-                      <button 
-                        className="cancel-btn"
-                        onClick={cancelEdit}
-                        title="Отменить"
-                      >
-                        <RiCloseLine />
-                      </button>
-                    </div>
-                  </div>
-                ) : (
-                  <>
-                    <div className="chat-title">
-                      {Boolean(chat.pinned) && <RiPushpinLine className="pin-icon" />}
-                      <span>{chat.title}</span>
-                    </div>
-                    <div className="chat-meta">
-                      <span className="last-message">
-                        {chat.last_message ? truncateMessage(chat.last_message) : 'Новый чат'}
-                      </span>
-                      <span className="last-message-time">
-                        {chat.last_message_at ? formatDate(chat.last_message_at) : ''}
-                      </span>
-                    </div>
-                  </>
-                )}
-              </div>
-              
-              {editingChat !== chat.id && (
-                <div className="chat-actions">
-                  <button
-                    className="action-btn pin-btn"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      togglePin(chat.id, Boolean(chat.pinned));
-                    }}
-                    title={Boolean(chat.pinned) ? 'Открепить' : 'Закрепить'}
-                  >
-                    <RiPushpinLine className={Boolean(chat.pinned) ? 'pinned' : ''} />
-                  </button>
-                  <button
-                    className="action-btn edit-btn"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      startEdit(chat);
-                    }}
-                    title="Редактировать"
-                  >
-                    <RiEditLine />
-                  </button>
-                  <button
-                    className="action-btn delete-btn"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      deleteChat(chat.id);
-                    }}
-                    title="Удалить"
-                  >
-                    <RiDeleteBinLine />
-                  </button>
-                </div>
-              )}
+      {/* Body - Scrollable chat list */}
+      <div className="chats-list-container">
+        <div className="chats-list">
+          {chats.length === 0 ? (
+            <div className="no-chats">
+              <RiChat3Line className="no-chats-icon" />
+              <p>У вас пока нет чатов</p>
+              <button className="create-first-chat" onClick={createNewChat}>
+                Создать первый чат
+              </button>
             </div>
-          ))
+          ) : (
+            groupedChats.map((group, groupIndex) => (
+              <div key={groupIndex} className="chat-group">
+                <div className="chat-group-header">{group.label}</div>
+                {group.chats.map(chat => (
+                  <div 
+                    key={chat.id} 
+                    className={`chat-item ${currentChatId === chat.id ? 'active' : ''}`}
+                    onClick={() => onChatSelect(chat.id)}
+                    onMouseEnter={() => setHoveredChat(chat.id)}
+                    onMouseLeave={() => setHoveredChat(null)}
+                  >
+                    <div className="chat-content">
+                      {editingChat === chat.id ? (
+                        <div className="edit-chat">
+                          <input
+                            type="text"
+                            value={editTitle}
+                            onChange={(e) => setEditTitle(e.target.value)}
+                            onKeyPress={(e) => {
+                              if (e.key === 'Enter') {
+                                saveEdit(chat.id);
+                              } else if (e.key === 'Escape') {
+                                cancelEdit();
+                              }
+                            }}
+                            onBlur={() => saveEdit(chat.id)}
+                            autoFocus
+                            className="edit-input"
+                            onClick={(e) => e.stopPropagation()}
+                          />
+                        </div>
+                      ) : (
+                        <>
+                          <div className="chat-title">
+                            {chat.pinned && <RiPushpinLine className="pin-icon" />}
+                            <span className="chat-title-text">{chat.title}</span>
+                          </div>
+                          {chat.last_message && (
+                            <div className="chat-preview">
+                              {truncateMessage(chat.last_message)}
+                            </div>
+                          )}
+                        </>
+                      )}
+                    </div>
+                    
+                    {editingChat !== chat.id && (
+                      <div className={`chat-actions ${hoveredChat === chat.id ? 'visible' : ''}`}>
+                        <button
+                          className="action-btn more-btn"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setOpenMenuChat(openMenuChat === chat.id ? null : chat.id);
+                          }}
+                          title="Дополнительно"
+                        >
+                          <RiMoreLine />
+                        </button>
+                        {openMenuChat === chat.id && (
+                          <div className="chat-actions-menu" onClick={(e) => e.stopPropagation()}>
+                            <button
+                              className="action-menu-item"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                togglePin(chat.id, Boolean(chat.pinned));
+                                setOpenMenuChat(null);
+                              }}
+                              title={chat.pinned ? 'Открепить' : 'Закрепить'}
+                            >
+                              <RiPushpinLine />
+                              <span>{chat.pinned ? 'Открепить' : 'Закрепить'}</span>
+                            </button>
+                            <button
+                              className="action-menu-item"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                startEdit(chat);
+                                setOpenMenuChat(null);
+                              }}
+                              title="Переименовать"
+                            >
+                              <RiEditLine />
+                              <span>Переименовать</span>
+                            </button>
+                            <button
+                              className="action-menu-item delete"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                deleteChat(chat.id);
+                                setOpenMenuChat(null);
+                              }}
+                              title="Удалить"
+                            >
+                              <RiDeleteBinLine />
+                              <span>Удалить</span>
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+
+      {/* Footer */}
+      <div className="chat-manager-footer">
+        {onOpenProfile && (
+          <button className="footer-btn" onClick={onOpenProfile} title={user?.name || 'Профиль'}>
+            <RiUserLine />
+            <span>{user?.name || 'Профиль'}</span>
+          </button>
         )}
+        {onOpenSettings && (
+          <button className="footer-btn" onClick={onOpenSettings} title="Настройки">
+            <RiSettings3Line />
+            <span>Настройки</span>
+          </button>
+        )}
+        <button className="footer-btn" onClick={() => {/* Open help */}} title="Помощь">
+          <RiQuestionLine />
+          <span>Помощь</span>
+        </button>
       </div>
     </div>
   );

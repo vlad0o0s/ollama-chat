@@ -24,7 +24,12 @@ class VRAMMonitor:
         
         # Пытаемся инициализировать nvidia-ml-py (замена устаревшего pynvml)
         try:
-            import pynvml
+            import warnings
+            # Подавляем предупреждение о deprecated pynvml, так как мы используем nvidia-ml-py
+            # который предоставляет интерфейс pynvml для обратной совместимости
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", category=FutureWarning, message=".*pynvml.*")
+                import pynvml  # nvidia-ml-py предоставляет интерфейс pynvml
             # nvidia-ml-py использует тот же интерфейс pynvml, но это современная версия
             pynvml.nvmlInit()
             self._pynvml_available = True

@@ -7,7 +7,7 @@ import os
 import logging
 from .config import settings
 from .database import init_db
-from .routes import auth, chats, admin, search_chat, image_generation
+from .routes import auth, chats, admin, search_chat, image_generation, process
 from .models.user import User
 from .database import get_db, SessionLocal
 from .utils.add_edit_delete_fields_to_messages import add_edit_delete_fields
@@ -44,6 +44,7 @@ app.include_router(chats.router)
 app.include_router(admin.router)
 app.include_router(search_chat.router)
 app.include_router(image_generation.router)
+app.include_router(process.router)
 
 
 @app.on_event("startup")
@@ -52,11 +53,11 @@ async def startup_event():
     # Инициализация базы данных
     init_db()
     
-    # Добавляем поля для редактирования и удаления сообщений
+    # Добавляем поля для редактирования и удаления сообщений (тихо, только при ошибках)
     try:
         add_edit_delete_fields()
     except Exception as e:
-        logging.error(f"Ошибка при добавлении полей для редактирования/удаления: {e}")
+        logging.error(f"❌ Ошибка при добавлении полей для редактирования/удаления: {e}")
     
     # Назначаем пользователя vlad0o0s администратором при запуске сервера
     db = SessionLocal()
@@ -66,13 +67,12 @@ async def startup_event():
             if user.role != "admin":
                 user.role = "admin"
                 db.commit()
-                print("✅ Пользователь vlad0o0s назначен администратором")
-            else:
-                print("✅ Пользователь vlad0o0s уже является администратором")
+                logging.info("✅ Пользователь vlad0o0s назначен администратором")
+            # else: убрано логирование - пользователь уже админ
         else:
-            print("⚠️ Пользователь vlad0o0s не найден в базе данных")
+            logging.debug("⚠️ Пользователь vlad0o0s не найден в базе данных")
     except Exception as e:
-        print(f"❌ Ошибка назначения админа: {e}")
+        logging.error(f"❌ Ошибка назначения админа: {e}")
         db.rollback()
     finally:
         db.close()

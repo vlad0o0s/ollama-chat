@@ -41,7 +41,7 @@ def add_edit_delete_fields():
             db.commit()
             logger.info("✅ Поле deleted добавлено")
         else:
-            logger.info("Поле deleted уже существует")
+            logger.debug("Поле deleted уже существует")
         
         # Проверяем, существует ли поле edited
         if engine.url.drivername == 'sqlite':
@@ -69,7 +69,7 @@ def add_edit_delete_fields():
             db.commit()
             logger.info("✅ Поле edited добавлено")
         else:
-            logger.info("Поле edited уже существует")
+            logger.debug("Поле edited уже существует")
         
         # Проверяем, существует ли поле edited_at
         if engine.url.drivername == 'sqlite':
@@ -94,7 +94,7 @@ def add_edit_delete_fields():
             db.commit()
             logger.info("✅ Поле edited_at добавлено")
         else:
-            logger.info("Поле edited_at уже существует")
+            logger.debug("Поле edited_at уже существует")
         
         # Создаем индекс для поля deleted для улучшения производительности
         try:
@@ -104,11 +104,11 @@ def add_edit_delete_fields():
             else:
                 db.execute(text("CREATE INDEX IF NOT EXISTS idx_messages_deleted ON messages(deleted)"))
                 db.commit()
-                logger.info("✅ Индекс для поля deleted создан")
+                logger.debug("✅ Индекс для поля deleted создан")
         except Exception as e:
-            logger.warning(f"Не удалось создать индекс для deleted: {e}")
+            logger.debug(f"Индекс для deleted уже существует или ошибка: {e}")
         
-        logger.info("✅ Все поля успешно добавлены")
+        logger.debug("✅ Все поля успешно добавлены")
         
     except Exception as e:
         logger.error(f"❌ Ошибка при добавлении полей: {e}")

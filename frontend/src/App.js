@@ -79,12 +79,18 @@ function App() {
   const [copiedMessages, setCopiedMessages] = useState(new Set());
   const [showPlusMenu, setShowPlusMenu] = useState(false);
   const [imageForCreation, setImageForCreation] = useState(null); // Загруженное изображение для создания
+  const [uploadedImage, setUploadedImage] = useState(null); // Загруженное изображение для чата
+  const [isDragging, setIsDragging] = useState(false); // Состояние drag-and-drop
+  const [dragCounter, setDragCounter] = useState(0); // Счетчик для предотвращения моргания
   const [editingMessageId, setEditingMessageId] = useState(null); // ID редактируемого сообщения
   const [editingContent, setEditingContent] = useState(''); // Содержимое редактируемого сообщения
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
   const plusMenuRef = useRef(null);
+  const plusMenuButtonRef = useRef(null);
+  const plusMenuDropdownRef = useRef(null);
   const imageCreationFileInputRef = useRef(null); // For image creation specific upload
+  const chatFileInputRef = useRef(null); // For chat image upload
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -206,30 +212,81 @@ function App() {
     };
   }, [lightboxImage]);
 
-  // Функция для генерации возможных IP адресов
+  // Обработка drag-and-drop на уровне документа
+  useEffect(() => {
+    const handleDocumentDragOver = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+    };
+
+    const handleDocumentDrop = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      setIsDragging(false);
+    };
+
+    document.addEventListener('dragover', handleDocumentDragOver);
+    document.addEventListener('drop', handleDocumentDrop);
+
+    return () => {
+      document.removeEventListener('dragover', handleDocumentDragOver);
+      document.removeEventListener('drop', handleDocumentDrop);
+    };
+  }, []);
+
+  // Позиционирование меню относительно кнопки и обработка клика вне меню
+  useEffect(() => {
+    if (!showPlusMenu || !plusMenuButtonRef.current || !plusMenuDropdownRef.current) {
+      return;
+    }
+
+    const updateMenuPosition = () => {
+      const buttonRect = plusMenuButtonRef.current.getBoundingClientRect();
+      const menu = plusMenuDropdownRef.current;
+      
+      // Позиционируем меню над кнопкой
+      menu.style.position = 'fixed';
+      menu.style.bottom = `${window.innerHeight - buttonRect.top + 12}px`;
+      menu.style.left = `${buttonRect.left}px`;
+    };
+
+    updateMenuPosition();
+    window.addEventListener('resize', updateMenuPosition);
+    window.addEventListener('scroll', updateMenuPosition, true);
+
+    // Обработка клика вне меню
+    const handleClickOutside = (e) => {
+      if (
+        plusMenuButtonRef.current &&
+        plusMenuDropdownRef.current &&
+        !plusMenuButtonRef.current.contains(e.target) &&
+        !plusMenuDropdownRef.current.contains(e.target)
+      ) {
+        setShowPlusMenu(false);
+      }
+    };
+
+    // Небольшая задержка, чтобы не закрыть меню сразу после открытия
+    setTimeout(() => {
+      document.addEventListener('click', handleClickOutside);
+    }, 0);
+
+    return () => {
+      window.removeEventListener('resize', updateMenuPosition);
+      window.removeEventListener('scroll', updateMenuPosition, true);
+      document.removeEventListener('click', handleClickOutside);
+    };
+  }, [showPlusMenu]);
+
+  // Функция для генерации возможных IP адресов (только статичные адреса)
   const generatePossibleUrls = () => {
-    const urls = [
-      // Сначала пробуем ваш основной IP для разработки
+    return [
+      // Основной статичный IP
       'http://192.168.10.12:11434',
-      // Потом localhost для переноса на другой ПК
-      'http://localhost:11434',
-      'http://127.0.0.1:11434'
+      // Локальные адреса (на случай, если Ollama запущен локально)
+      'http://127.0.0.1:11434',
+      'http://localhost:11434'
     ];
-    
-    // Добавляем возможные локальные IP адреса для других сетей
-    const possibleIPs = [
-      '192.168.1.1', '192.168.1.2', '192.168.1.3', '192.168.1.4', '192.168.1.5',
-      '192.168.0.1', '192.168.0.2', '192.168.0.3', '192.168.0.4', '192.168.0.5',
-      '192.168.10.1', '192.168.10.2', '192.168.10.3', '192.168.10.4', '192.168.10.5',
-      '10.0.0.1', '10.0.0.2', '10.0.0.3', '10.0.0.4', '10.0.0.5',
-      '172.16.0.1', '172.16.0.2', '172.16.0.3', '172.16.0.4', '172.16.0.5'
-    ];
-    
-    possibleIPs.forEach(ip => {
-      urls.push(`http://${ip}:11434`);
-    });
-    
-    return urls;
   };
 
   // Загрузка доступных моделей из Ollama
@@ -275,6 +332,139 @@ function App() {
       setIsConnected(false);
     } finally {
       setLoadingModels(false);
+    }
+  };
+
+  // Функция для проверки статуса процессов
+  const checkProcessStatus = async () => {
+    try {
+      const token = localStorage.getItem('token');
+      const response = await fetch('/api/process/status', {
+        method: 'GET',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': token ? `Bearer ${token}` : '',
+        }
+      });
+      
+      if (response.ok) {
+        const status = await response.json();
+        return status;
+      }
+      return null;
+    } catch (error) {
+      console.warn('App: ⚠️ Не удалось получить статус процессов:', error.message);
+      return null;
+    }
+  };
+
+  // Функция для переключения на Ollama через бэкенд API
+  const switchToOllama = async () => {
+    try {
+      console.log('App: Пытаемся переключиться на Ollama через бэкенд API...');
+      
+      // Сначала проверяем статус процессов
+      const status = await checkProcessStatus();
+      if (status && status.status) {
+        const comfyuiStatus = status.status.comfyui;
+        if (comfyuiStatus && comfyuiStatus.running) {
+          console.warn('App: ⚠️ ComfyUI активен, не переключаемся на Ollama, чтобы не прервать работу ComfyUI');
+          return false;
+        }
+      }
+      
+      const token = localStorage.getItem('token');
+      
+      // Вызываем бэкенд API для переключения процессов
+      const response = await fetch('/api/process/switch?service=ollama', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': token ? `Bearer ${token}` : '',
+        }
+      });
+      
+      if (response.ok) {
+        const result = await response.json();
+        console.log('App: ✅ Успешно переключено на Ollama:', result);
+        
+        // После переключения Ollama запускается локально на 127.0.0.1:11434 (как проверяет бэкенд)
+        // Пробуем подключиться к обоим адресам с повторными попытками
+        console.log('App: ⏳ Ожидание запуска Ollama и проверка подключения...');
+        
+        // Пробуем подключиться с повторными попытками (до 5 попыток с интервалом 3 секунды)
+        const maxAttempts = 5;
+        const retryDelay = 3000;
+        
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+          console.log(`App: Попытка подключения ${attempt}/${maxAttempts}...`);
+          
+          // Пробуем сначала 127.0.0.1 (локальный, как проверяет бэкенд)
+          try {
+            const checkResponse = await fetch('http://127.0.0.1:11434/api/tags', {
+              method: 'GET',
+              headers: {
+                'Content-Type': 'application/json',
+              }
+            });
+            if (checkResponse.ok) {
+              console.log('App: ✅ Ollama доступен на http://127.0.0.1:11434');
+              setOllamaUrl('http://127.0.0.1:11434');
+              setIsConnected(true);
+              return true;
+            }
+          } catch (checkError) {
+            // Игнорируем ошибку, пробуем дальше
+          }
+          
+          // Пробуем 192.168.10.12
+          try {
+            const checkResponse = await fetch('http://192.168.10.12:11434/api/tags', {
+              method: 'GET',
+              headers: {
+                'Content-Type': 'application/json',
+              }
+            });
+            if (checkResponse.ok) {
+              console.log('App: ✅ Ollama доступен на http://192.168.10.12:11434');
+              setOllamaUrl('http://192.168.10.12:11434');
+              setIsConnected(true);
+              return true;
+            }
+          } catch (checkError) {
+            // Игнорируем ошибку, пробуем дальше
+          }
+          
+          // Если не последняя попытка, ждем перед следующей
+          if (attempt < maxAttempts) {
+            console.log(`App: ⏳ Ollama еще не готов, повтор через ${retryDelay/1000} секунд...`);
+            await new Promise(resolve => setTimeout(resolve, retryDelay));
+          }
+        }
+        
+        console.warn('App: ⚠️ Не удалось подключиться к Ollama после переключения, но переключение выполнено');
+        return true; // Возвращаем true, так как переключение успешно
+      } else if (response.status === 409) {
+        // Конфликт - ComfyUI активен
+        console.warn('App: ⚠️ ComfyUI активен, переключение на Ollama отменено');
+        return false;
+      } else {
+        const errorText = await response.text();
+        let error;
+        try {
+          error = JSON.parse(errorText);
+        } catch {
+          error = { detail: errorText };
+        }
+        console.warn('App: ⚠️ Бэкенд API вернул ошибку при переключении на Ollama:', error);
+        return false;
+      }
+    } catch (error) {
+      // Если бэкенд API недоступен, это не критично
+      console.warn('App: ⚠️ Не удалось переключиться на Ollama через бэкенд API:', error.message);
+      console.warn('App: ⚠️ Продолжаем работу. Переключение может произойти автоматически на бэкенде.');
+      // Не критично, продолжаем работу
+      return false;
     }
   };
 
@@ -454,7 +644,8 @@ function App() {
   };
 
   const sendMessage = async (retryCount = 0) => {
-    if (!inputMessage.trim() || isLoading) return;
+    // Проверяем, что есть либо текст, либо загруженное изображение, и не идет загрузка
+    if ((!inputMessage.trim() && !uploadedImage) || isLoading) return;
     
     // Если включен режим изображения, используем генерацию изображения
     if (isImageMode) {
@@ -462,17 +653,34 @@ function App() {
       return;
     }
 
-    // Проверяем соединение с Ollama перед отправкой
-    const isConnected = await checkOllamaConnection();
+    // Автоматически пытаемся включить и подключиться к Ollama перед отправкой текстового сообщения
     if (!isConnected) {
-      console.error('App: Нет соединения с Ollama, отменяем отправку сообщения');
-      const errorMessage = { 
-        role: 'assistant', 
-        content: 'Нет соединения с Ollama. Проверьте, что Ollama запущен и доступен.'
-      };
-      const finalMessages = [...messages, errorMessage];
-      setMessages(finalMessages);
-      return;
+      console.log('App: Ollama не подключен, пытаемся автоматически включить и подключиться...');
+      
+      // Сначала пытаемся переключиться на Ollama через API
+      const switchResult = await switchToOllama();
+      if (switchResult) {
+        console.log('App: ✅ Ollama успешно включен через API');
+        // switchToOllama уже проверил подключение и обновил URL, просто продолжаем
+        // Если подключение не установлено, пробуем еще раз через checkOllamaConnection
+        if (!isConnected) {
+          console.log('App: ⚠️ Подключение не установлено, пробуем через checkOllamaConnection...');
+          const connectionResult = await checkOllamaConnection();
+          if (connectionResult) {
+            console.log('App: ✅ Ollama успешно подключен автоматически');
+          }
+        }
+      } else {
+        // Если переключение не удалось (возможно, ComfyUI активен), проверяем подключение
+        const connectionResult = await checkOllamaConnection();
+        if (!connectionResult) {
+          console.warn('App: ⚠️ Не удалось автоматически подключиться к Ollama. ComfyUI может быть активен.');
+          alert('Не удалось переключиться на Ollama. ComfyUI может быть активен. Дождитесь завершения генерации изображения или остановите её.');
+          return;
+        } else {
+          console.log('App: ✅ Ollama уже доступен');
+        }
+      }
     }
 
     // Создаем новый чат только если его нет и есть сообщение для отправки
@@ -516,12 +724,51 @@ function App() {
       console.log('App: Используем существующий чат:', chatId);
     }
 
-    const userMessage = { role: 'user', content: inputMessage };
+    // Загружаем изображение, если оно есть
+    let uploadedImageId = null;
+    if (uploadedImage) {
+      try {
+        const token = localStorage.getItem('token');
+        const formData = new FormData();
+        formData.append('file', uploadedImage.file);
+        formData.append('chat_id', chatId);
+        if (inputMessage.trim()) {
+          formData.append('description', inputMessage.trim());
+        }
+
+        const uploadResponse = await fetch('/api/image/upload', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${token}`
+          },
+          body: formData
+        });
+
+        if (uploadResponse.ok) {
+          const uploadResult = await uploadResponse.json();
+          uploadedImageId = uploadResult.message_id;
+          // Перезагружаем сообщения чтобы получить актуальные данные
+          await loadChatMessages(chatId);
+          setUploadedImage(null); // Очищаем загруженное изображение
+        } else {
+          console.error('Ошибка загрузки изображения');
+          alert('Ошибка загрузки изображения');
+          return;
+        }
+      } catch (error) {
+        console.error('Ошибка при загрузке изображения:', error);
+        alert('Ошибка сети при загрузке изображения');
+        return;
+      }
+    }
+
+    const userMessage = { role: 'user', content: inputMessage.trim() || (uploadedImage ? 'Изображение' : '') };
     const newMessages = [...messages, userMessage];
     const isFirstUserMessage = messages.length === 0; // Проверяем ДО добавления сообщения
     console.log('App: Отправка сообщения. Текущее количество сообщений:', messages.length, 'Первое сообщение:', isFirstUserMessage);
     setMessages(newMessages);
     setInputMessage('');
+    setUploadedImage(null); // Очищаем изображение после отправки
     resetTextareaHeight(); // Сбрасываем высоту textarea к исходному состоянию
     setIsLoading(true);
     setAiResponse(''); // Очищаем предыдущий ответ
@@ -927,10 +1174,16 @@ function App() {
     }
   };
 
-  const handleKeyPress = (e) => {
+  const handleKeyDown = (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      sendMessage();
+      // Проверяем, что не идет загрузка и есть либо текст, либо загруженное изображение
+      if (!isLoading && (inputMessage.trim() || uploadedImage)) {
+        console.log('App: Enter нажат, отправляем сообщение');
+        sendMessage();
+      } else {
+        console.log('App: Enter нажат, но отправка заблокирована', { isLoading, hasText: !!inputMessage.trim(), hasImage: !!uploadedImage });
+      }
     }
   };
 
@@ -940,6 +1193,100 @@ function App() {
     const textarea = e.target;
     textarea.style.height = 'auto';
     textarea.style.height = Math.min(textarea.scrollHeight, 200) + 'px';
+  };
+
+  // Обработка загрузки изображения для чата
+  const handleImageUpload = (file) => {
+    if (!file.type.startsWith('image/')) {
+      alert('Пожалуйста, выберите файл изображения');
+      return;
+    }
+    
+    if (file.size > 10 * 1024 * 1024) {
+      alert('Файл слишком большой. Максимальный размер: 10MB');
+      return;
+    }
+    
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const imageData = {
+        file: file,
+        preview: e.target.result
+      };
+      
+      setUploadedImage(imageData);
+      
+      // Если активен режим создания изображений, также устанавливаем imageForCreation
+      if (isImageMode) {
+        setImageForCreation({
+          file: file,
+          url: e.target.result,
+          name: file.name
+        });
+      }
+    };
+    reader.readAsDataURL(file);
+  };
+
+  // Удаление загруженного изображения
+  const removeUploadedImage = () => {
+    setUploadedImage(null);
+    // Если активен режим создания изображений, также очищаем imageForCreation
+    if (isImageMode) {
+      setImageForCreation(null);
+    }
+    if (chatFileInputRef.current) {
+      chatFileInputRef.current.value = '';
+    }
+  };
+
+  // Обработка drag-and-drop с использованием счетчика для предотвращения моргания
+  const handleDragEnter = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragCounter(prev => prev + 1);
+    if (e.dataTransfer.items && e.dataTransfer.items.length > 0) {
+      setIsDragging(true);
+    }
+  };
+
+  const handleDragOver = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+  };
+
+  const handleDragLeave = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragCounter(prev => {
+      const newCount = prev - 1;
+      if (newCount === 0) {
+        setIsDragging(false);
+      }
+      return newCount;
+    });
+  };
+
+  const handleDrop = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+    setDragCounter(0);
+
+    const files = Array.from(e.dataTransfer.files);
+    const imageFile = files.find(file => file.type.startsWith('image/'));
+    
+    if (imageFile) {
+      handleImageUpload(imageFile);
+    }
+  };
+
+  // Обработка выбора файла через input
+  const handleFileSelect = (e) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      handleImageUpload(file);
+    }
   };
 
   // Обработчик выбора файла для создания изображения
@@ -1148,12 +1495,14 @@ function App() {
     
     // Если есть изображение для создания, загружаем его на сервер вместе с описанием
     // Это создаст одно сообщение с изображением и текстом
+    // Используем uploadedImage если он есть, иначе imageForCreation
     let referenceImageId = null;
-    if (imageForCreation) {
+    const imageToUse = uploadedImage || imageForCreation;
+    if (imageToUse) {
       try {
         const token = localStorage.getItem('token');
         const formData = new FormData();
-        formData.append('file', imageForCreation.file);
+        formData.append('file', imageToUse.file);
         formData.append('chat_id', currentChatId);
         // Добавляем описание в сообщение с изображением
         if (inputMessage.trim()) {
@@ -1216,6 +1565,7 @@ function App() {
     
     // Сбрасываем загруженное изображение после отправки запроса
     setImageForCreation(null);
+    setUploadedImage(null);
     
     try {
       const token = localStorage.getItem('token');
@@ -1407,13 +1757,13 @@ function App() {
   if (authLoading) {
     return (
       <div className="loading-screen">
-        <div className="skeleton-loading-content">
-          <div className="skeleton-loading-icon"></div>
-          <div className="skeleton-loading-text"></div>
-        </div>
+      <div className="skeleton-loading-content">
+        <div className="skeleton-loading-icon"></div>
+        <div className="skeleton-loading-text">        </div>
       </div>
-    );
-  }
+    </div>
+  );
+}
 
   // Показываем экран авторизации если пользователь не авторизован
   if (!isAuthenticated) {
@@ -1428,24 +1778,6 @@ function App() {
     );
   }
 
-  // Показываем профиль пользователя если открыт
-  if (showProfile) {
-    return (
-      <div className="app">
-        <UserProfile onClose={() => setShowProfile(false)} />
-      </div>
-    );
-  }
-
-  // Показываем админ-панель если открыта
-  if (showAdminPanel) {
-    return (
-      <div className="app">
-        <AdminPanel onClose={() => setShowAdminPanel(false)} />
-      </div>
-    );
-  }
-
   return (
     <div className="app">
       {/* Боковая панель с менеджером чатов */}
@@ -1455,16 +1787,20 @@ function App() {
         refreshTrigger={chatRefreshTrigger}
         chats={chats}
         isHidden={!sidebarOpen}
+        onToggleSidebar={() => setSidebarOpen(!sidebarOpen)}
+        onOpenProfile={() => setShowProfile(true)}
+        onOpenSettings={() => setShowSettings(!showSettings)}
       />
 
       <div className={`chat-container ${!sidebarOpen ? 'expanded' : ''}`}>
         <div className="chat-header">
           <div className="header-left">
             <button 
-              onClick={() => setSidebarOpen(!sidebarOpen)} 
-              className="menu-btn"
+              onClick={() => setSidebarOpen(true)} 
+              className={`menu-btn ${!sidebarOpen ? 'visible' : 'hidden'}`}
+              title="Открыть меню чатов"
             >
-              {sidebarOpen ? <RiCloseLine /> : <RiMenuLine />}
+              <RiMenuLine />
             </button>
             <h1>
               <RiRobot2Line className="header-icon" />
@@ -1640,44 +1976,58 @@ function App() {
               ) : message.role === 'assistant' ? (
                 message.isTyping ? (
                   <div className="typing-indicator">
-                    <div className="glass-typing-dots">
-                      <div className="glass-typing-dot"></div>
-                      <div className="glass-typing-dot"></div>
-                      <div className="glass-typing-dot"></div>
+                    <div className="assistant-avatar">
+                      <RiRobot2Line />
                     </div>
-                    <span className="typing-text">
-                      Генерируется ответ...
-                      {message.retryAttempt > 0 && (
-                        <span className="retry-indicator">
-                          (Попытка {message.retryAttempt})
-                        </span>
-                      )}
-                    </span>
+                    <div className="typing-content">
+                      <div className="glass-typing-dots">
+                        <div className="glass-typing-dot"></div>
+                        <div className="glass-typing-dot"></div>
+                        <div className="glass-typing-dot"></div>
+                      </div>
+                      <span className="typing-text">
+                        Генерируется ответ...
+                        {message.retryAttempt > 0 && (
+                          <span className="retry-indicator">
+                            (Попытка {message.retryAttempt})
+                          </span>
+                        )}
+                      </span>
+                    </div>
                   </div>
                 ) : message.message_type === 'image_generating' ? (
-                  <div className="message-content image-message">
-                    <div className="image-preview-container">
-                      <div 
-                        className="image-generating-placeholder"
-                        style={{
-                          aspectRatio: message.aspect_ratio ? message.aspect_ratio.replace(':', '/') : '1/1',
-                          maxWidth: message.width ? `${Math.min(message.width, 1024)}px` : '1024px',
-                          maxHeight: message.height ? `${Math.min(message.height, 1024)}px` : '1024px'
-                        }}
-                      >
-                        <div className="generating-image-blur">
-                          <div className="generating-noise"></div>
-                        </div>
-                        {message.status === 'error' && (
-                          <div className="generating-error-overlay">
-                            <div className="generating-error-text">Ошибка генерации</div>
+                  <>
+                    <div className="assistant-avatar">
+                      <RiRobot2Line />
+                    </div>
+                    <div className="message-content image-message">
+                      <div className="image-preview-container">
+                        <div 
+                          className="image-generating-placeholder"
+                          style={{
+                            aspectRatio: message.aspect_ratio ? message.aspect_ratio.replace(':', '/') : '1/1',
+                            maxWidth: message.width ? `${Math.min(message.width, 1024)}px` : '1024px',
+                            maxHeight: message.height ? `${Math.min(message.height, 1024)}px` : '1024px'
+                          }}
+                        >
+                          <div className="generating-image-blur">
+                            <div className="generating-noise"></div>
                           </div>
-                        )}
+                          {message.status === 'error' && (
+                            <div className="generating-error-overlay">
+                              <div className="generating-error-text">Ошибка генерации</div>
+                            </div>
+                          )}
+                        </div>
                       </div>
                     </div>
-                  </div>
+                  </>
                 ) : message.message_type === 'image' && message.image_url ? (
-                  <div className="message-content image-message">
+                  <>
+                    <div className="assistant-avatar">
+                      <RiRobot2Line />
+                    </div>
+                    <div className="message-content image-message">
                     <div className="image-preview-container">
                       <img 
                         src={message.image_url} 
@@ -1724,9 +2074,13 @@ function App() {
                         <MarkdownRenderer content={message.content} />
                       </div>
                     )}
-                  </div>
+                    </div>
+                  </>
                 ) : (
                   <>
+                    <div className="assistant-avatar">
+                      <RiRobot2Line />
+                    </div>
                     <div className="message-content">
                       <MarkdownRenderer content={message.content} />
                     </div>
@@ -1795,112 +2149,74 @@ function App() {
           <div ref={messagesEndRef} />
         </div>
 
-        {/* Кнопки активных режимов */}
-        <div className="active-modes-buttons">
-          {isImageMode && (
-            <button
-              onClick={() => {
-                setIsImageMode(false);
-                setImageForCreation(null);
-              }}
-              className="active-mode-button image-mode-button"
-              title="Отключить режим создания изображения"
-            >
-              <RiImage2Line className="active-mode-button-icon" />
-              <span>Создание изображения</span>
-              <RiCloseLine className="active-mode-button-close" />
-            </button>
-          )}
-          {useWebSearch && (
-            <button
-              onClick={() => setUseWebSearch(false)}
-              className="active-mode-button search-mode-button"
-              title="Отключить поиск в интернете"
-            >
-              <RiSearchLine className="active-mode-button-icon" />
-              <span>Поиск в интернете</span>
-              <RiCloseLine className="active-mode-button-close" />
-            </button>
-          )}
-        </div>
-
+        {/* Aspect Ratio Selector - над input-container */}
         {isImageMode && (
-          <div className="image-creation-interface">
-            <div className="image-creation-content-compact">
-              {imageForCreation ? (
-                <div className="image-preview-wrapper-compact">
-                  <div className="image-preview-container-compact">
-                    <img 
-                      src={imageForCreation.url} 
-                      alt={imageForCreation.name}
-                      className="image-preview-compact"
-                    />
-                    <button
-                      className="image-preview-remove-compact"
-                      onClick={handleRemoveImageForCreation}
-                      title="Удалить изображение"
-                    >
-                      <RiCloseLine />
-                    </button>
-                  </div>
-                </div>
-              ) : (
+          <div className="aspect-ratio-selector-wrapper">
+            <div className="aspect-ratio-selector-container">
+              <div className="aspect-ratio-buttons-group">
                 <button
-                  onClick={() => imageCreationFileInputRef.current?.click()}
-                  className="image-upload-button-compact"
-                  title="Добавить изображение"
+                  onClick={() => setImageAspectRatio('9:16')}
+                  className={`aspect-ratio-chip ${imageAspectRatio === '9:16' ? 'active' : ''}`}
+                  title="Вертикальное (9:16)"
                 >
-                  <RiAddLine className="image-upload-icon-compact" />
-                  <RiImage2Line className="image-upload-icon-secondary-compact" />
-                  <span className="image-upload-text-compact">Изображение</span>
+                  9:16
                 </button>
-              )}
-              {!imageForCreation && (
-                <div className="aspect-ratio-selector-compact">
-                  <div className="aspect-ratio-buttons-compact">
-                    <button
-                      onClick={() => setImageAspectRatio('9:16')}
-                      className={`aspect-ratio-button-compact ${imageAspectRatio === '9:16' ? 'active' : ''}`}
-                      title="Вертикальное (9:16)"
-                    >
-                      9:16
-                    </button>
-                    <button
-                      onClick={() => setImageAspectRatio('16:9')}
-                      className={`aspect-ratio-button-compact ${imageAspectRatio === '16:9' ? 'active' : ''}`}
-                      title="Горизонтальное (16:9)"
-                    >
-                      16:9
-                    </button>
-                    <button
-                      onClick={() => setImageAspectRatio('1:1')}
-                      className={`aspect-ratio-button-compact ${imageAspectRatio === '1:1' ? 'active' : ''}`}
-                      title="Квадратное (1:1)"
-                    >
-                      1:1
-                    </button>
-                    <button
-                      onClick={() => setImageAspectRatio('3:4')}
-                      className={`aspect-ratio-button-compact ${imageAspectRatio === '3:4' ? 'active' : ''}`}
-                      title="Портретное (3:4)"
-                    >
-                      3:4
-                    </button>
-                    <button
-                      onClick={() => setImageAspectRatio('4:3')}
-                      className={`aspect-ratio-button-compact ${imageAspectRatio === '4:3' ? 'active' : ''}`}
-                      title="Альбомное (4:3)"
-                    >
-                      4:3
-                    </button>
-                  </div>
-                </div>
-              )}
+                <button
+                  onClick={() => setImageAspectRatio('16:9')}
+                  className={`aspect-ratio-chip ${imageAspectRatio === '16:9' ? 'active' : ''}`}
+                  title="Горизонтальное (16:9)"
+                >
+                  16:9
+                </button>
+                <button
+                  onClick={() => setImageAspectRatio('1:1')}
+                  className={`aspect-ratio-chip ${imageAspectRatio === '1:1' ? 'active' : ''}`}
+                  title="Квадратное (1:1)"
+                >
+                  1:1
+                </button>
+                <button
+                  onClick={() => setImageAspectRatio('3:4')}
+                  className={`aspect-ratio-chip ${imageAspectRatio === '3:4' ? 'active' : ''}`}
+                  title="Портретное (3:4)"
+                >
+                  3:4
+                </button>
+                <button
+                  onClick={() => setImageAspectRatio('4:3')}
+                  className={`aspect-ratio-chip ${imageAspectRatio === '4:3' ? 'active' : ''}`}
+                  title="Альбомное (4:3)"
+                >
+                  4:3
+                </button>
+              </div>
             </div>
           </div>
         )}
 
-        <div className="input-container">
+        {/* Drag-and-Drop Overlay */}
+        {isDragging && (
+          <div 
+            className="drag-drop-overlay"
+            onDragEnter={handleDragEnter}
+            onDragOver={handleDragOver}
+            onDragLeave={handleDragLeave}
+            onDrop={handleDrop}
+          >
+            <div className="drag-drop-content">
+              <RiImageAddLine className="drag-drop-icon" />
+              <p className="drag-drop-text">Перетащите изображение сюда</p>
+            </div>
+          </div>
+        )}
+
+        <div 
+          className={`input-container ${uploadedImage ? 'has-image' : ''} ${isDragging ? 'dragging' : ''}`}
+          onDragEnter={handleDragEnter}
+          onDragOver={handleDragOver}
+          onDragLeave={handleDragLeave}
+          onDrop={handleDrop}
+        >
           <input
             ref={imageCreationFileInputRef}
             type="file"
@@ -1908,56 +2224,121 @@ function App() {
             onChange={handleFileSelectForCreation}
             style={{ display: 'none' }}
           />
-          <div className="plus-menu-wrapper" ref={plusMenuRef}>
-            <button
-              onClick={handlePlusMenuToggle}
-              disabled={isLoading}
-              className="plus-menu-button"
-              title="Дополнительные опции"
-            >
-              <RiAddLine style={{fontSize: '20px'}} />
-            </button>
-            {showPlusMenu && (
-              <div className="plus-menu">
+          <input
+            ref={chatFileInputRef}
+            type="file"
+            accept="image/*"
+            onChange={handleFileSelect}
+            style={{ display: 'none' }}
+          />
+          <div className="input-wrapper">
+            {/* Row 1: Text Input Area */}
+            <div className="input-text-row">
+              {/* Inline Image Preview - внутри текстового поля */}
+              {uploadedImage && (
+                <div className="inline-image-preview-inline">
+                  <div className="preview-thumbnail-wrapper">
+                    <img 
+                      src={uploadedImage.preview} 
+                      alt="Preview" 
+                      className="preview-thumbnail"
+                    />
+                    <button
+                      className="remove-image-btn"
+                      onClick={removeUploadedImage}
+                      title="Удалить изображение"
+                    >
+                      <RiCloseLine />
+                    </button>
+                  </div>
+                </div>
+              )}
+              <textarea
+                ref={inputRef}
+                value={inputMessage}
+                onChange={handleInputChange}
+                onKeyDown={handleKeyDown}
+                placeholder="Введите ваше сообщение..."
+                className="message-input"
+                rows="1"
+                disabled={isLoading}
+              />
+            </div>
+
+            {/* Row 2: Action Bar */}
+            <div className="input-action-bar">
+              <div className="plus-menu-wrapper">
                 <button
-                  onClick={() => handleMenuOptionClick('createImage')}
-                  className={`plus-menu-item ${isImageMode ? 'active' : ''}`}
+                  ref={plusMenuButtonRef}
+                  onClick={handlePlusMenuToggle}
+                  disabled={isLoading}
+                  className="plus-menu-button"
+                  title="Дополнительные опции"
                 >
-                  <RiImage2Line className="plus-menu-icon" />
-                  <span>Создать изображение</span>
-                </button>
-                <button
-                  onClick={() => handleMenuOptionClick('webSearch')}
-                  className={`plus-menu-item ${useWebSearch ? 'active' : ''}`}
-                >
-                  <RiSearchLine className="plus-menu-icon" />
-                  <span>Поиск в интернете</span>
+                  <RiAddLine style={{fontSize: '18px'}} />
                 </button>
               </div>
-            )}
+              {/* Active Modes Chips */}
+              {(isImageMode || useWebSearch) && (
+                <div className="active-modes-chips">
+                  {isImageMode && (
+                    <button
+                      onClick={() => {
+                        setIsImageMode(false);
+                        setImageForCreation(null);
+                        setUploadedImage(null);
+                      }}
+                      className="active-mode-chip image-mode-chip"
+                      title="Отключить режим создания изображения"
+                    >
+                      <span className="active-mode-emoji">🎨</span>
+                      <span>Создание изображения</span>
+                      <RiCloseLine className="active-mode-chip-close" />
+                    </button>
+                  )}
+                  {useWebSearch && (
+                    <button
+                      onClick={() => setUseWebSearch(false)}
+                      className="active-mode-chip search-mode-chip"
+                      title="Отключить поиск в интернете"
+                    >
+                      <span className="active-mode-emoji">🌐</span>
+                      <span>Поиск в интернете</span>
+                      <RiCloseLine className="active-mode-chip-close" />
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
-          <textarea
-            ref={inputRef}
-            value={inputMessage}
-            onChange={handleInputChange}
-            onKeyPress={handleKeyPress}
-            placeholder="Введите ваше сообщение... (или перетащите изображение сюда)"
-            className="message-input"
-            rows="1"
-            disabled={isLoading}
-          />
-          <button 
-            onClick={isLoading ? stopGeneration : sendMessage} 
-            className="send-button"
-            disabled={!isLoading && (!inputMessage.trim() || isLoading)}
-          >
-            {isLoading ? (
-              <div className="glass-loading-icon" style={{width: '20px', height: '20px', border: '2px solid rgba(255, 255, 255, 0.3)', borderTop: '2px solid #ffffff'}}></div>
-            ) : (
-              <RiSendPlaneFill className="send-icon" />
-            )}
-          </button>
         </div>
+
+        {/* Plus Menu - вынесен за пределы input-wrapper */}
+        {showPlusMenu && (
+          <div className="plus-menu" ref={plusMenuDropdownRef}>
+            <button
+              onClick={() => chatFileInputRef.current?.click()}
+              className="plus-menu-item"
+            >
+              <RiImageAddLine className="plus-menu-icon" />
+              <span>Добавить изображение</span>
+            </button>
+            <button
+              onClick={() => handleMenuOptionClick('createImage')}
+              className={`plus-menu-item ${isImageMode ? 'active' : ''}`}
+            >
+              <RiImage2Line className="plus-menu-icon" />
+              <span>Создать изображение</span>
+            </button>
+            <button
+              onClick={() => handleMenuOptionClick('webSearch')}
+              className={`plus-menu-item ${useWebSearch ? 'active' : ''}`}
+            >
+              <RiSearchLine className="plus-menu-icon" />
+              <span>Поиск в интернете</span>
+            </button>
+          </div>
+        )}
       </div>
       
       {/* Лайтбокс для просмотра изображений */}
@@ -1984,6 +2365,16 @@ function App() {
             />
           </div>
         </div>
+      )}
+      
+      {/* Панель профиля */}
+      {showProfile && (
+        <UserProfile onClose={() => setShowProfile(false)} />
+      )}
+      
+      {/* Панель администратора */}
+      {showAdminPanel && (
+        <AdminPanel onClose={() => setShowAdminPanel(false)} />
       )}
     </div>
   );

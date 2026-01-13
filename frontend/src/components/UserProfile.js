@@ -60,8 +60,8 @@ const UserProfile = ({ onClose }) => {
   };
 
   return (
-    <div className="user-profile-overlay">
-      <div className="user-profile-card">
+    <div className="user-profile-overlay" onClick={onClose}>
+      <div className="user-profile-card" onClick={(e) => e.stopPropagation()}>
         <div className="profile-header">
           <div className="profile-avatar">
             <RiUserLine />
