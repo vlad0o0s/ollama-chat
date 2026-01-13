@@ -74,17 +74,6 @@ class Settings(BaseSettings):
     PROCESS_STARTUP_WAIT: int = 10  # время ожидания запуска процесса (секунды)
     PROCESS_RESTORE_ON_RELEASE: bool = True  # восстанавливать процесс после освобождения
     
-    # ComfyUI Configuration
-    COMFYUI_URL: str = ""  # URL ComfyUI сервера (обязательно указать в .env)
-    COMFYUI_MODEL: str = "flux1-dev-fp8"
-    COMFYUI_TIMEOUT: int = 300  # секунд (5 минут)
-    COMFYUI_RETRY_ATTEMPTS: int = 3
-    
-    # Image Storage Configuration
-    IMAGE_STORAGE_PATH: str = "static/images"
-    IMAGE_DEFAULT_WIDTH: int = 1024
-    IMAGE_DEFAULT_HEIGHT: int = 1024
-    
     class Config:
         env_file = ".env"
         case_sensitive = True

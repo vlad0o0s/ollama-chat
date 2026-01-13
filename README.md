@@ -19,6 +19,7 @@
 - 🔒 **Безопасность** - JWT аутентификация, хеширование паролей (bcrypt)
 - 📱 **Адаптивный дизайн** - Работает на десктопе и мобильных устройствах
 - 🖥️ **GPU Resource Management** - Умное управление GPU ресурсами между Ollama и ComfyUI
+- 🔄 **Process Management** - Автоматическое переключение между Ollama и ComfyUI с защитой активных процессов
 
 ## 📋 Требования
 
@@ -112,15 +113,17 @@ GPTChat/
 │   │   │   ├── chats.py    # Управление чатами
 │   │   │   ├── admin.py    # Админ панель
 │   │   │   ├── search_chat.py  # Чат с поиском
-│   │   │   └── image_generation.py  # Генерация изображений
+│   │   │   ├── image_generation.py  # Генерация изображений
+│   │   │   └── process.py  # Управление процессами (Ollama/ComfyUI)
 │   │   ├── schemas/        # Pydantic схемы
 │   │   ├── services/       # Бизнес-логика
 │   │   │   ├── search_service.py      # Сервис поиска (Tavily)
 │   │   │   ├── comfyui_service.py     # Сервис ComfyUI
 │   │   │   ├── prompt_service.py      # Сервис перевода промптов и анализа
 │   │   │   ├── resource_manager.py    # Управление GPU ресурсами
-│   │   │   ├── process_manager_service.py  # Управление процессами
-│   │   │   └── vram_monitor.py        # Мониторинг VRAM
+│   │   │   ├── process_manager_service.py  # Управление процессами через Process Manager API
+│   │   │   ├── vram_monitor.py        # Мониторинг VRAM
+│   │   │   └── service_types.py      # Типы сервисов (Ollama/ComfyUI)
 │   │   ├── auth/           # JWT аутентификация
 │   │   └── utils/          # Утилиты
 │   │       ├── image_storage.py  # Хранение изображений
@@ -427,6 +430,10 @@ REACT_APP_API_URL=http://localhost:5000
 - `POST /api/image/generate/stream` - Потоковая генерация изображения
 - `GET /api/image/{message_id}` - Получение метаданных изображения
 
+**Управление процессами:**
+- `POST /api/process/switch?service={ollama|comfyui}` - Переключение между Ollama и ComfyUI
+- `GET /api/process/status` - Получение статуса процессов (Ollama/ComfyUI)
+
 ### Параметры генерации изображений
 
 **POST /api/image/generate**
@@ -518,6 +525,8 @@ REACT_APP_API_URL=http://localhost:5000
 - Группировка запросов к Ollama для минимизации переключений процессов
 - Оптимизированные настройки для Flux.1-dev
 - Кэширование описаний изображений (в метаданных)
+- Защита от переключения на Ollama при активном ComfyUI
+- Автоматическое переключение на Ollama при отправке текстовых сообщений
 
 ## 🐛 Решение проблем
 
