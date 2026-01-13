@@ -1,25 +1,29 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from sqlalchemy import func, desc
+from datetime import datetime
 from typing import List, Optional
 from ..database import get_db
 from ..models.user import User
 from ..models.chat import Chat
 from ..models.message import Message
 from ..schemas.chat import ChatCreate, ChatUpdate, ChatResponse, ChatWithMessages
-from ..schemas.message import MessageCreate, MessageResponse
+from ..schemas.message import MessageCreate, MessageResponse, MessageUpdate
 from ..auth.dependencies import get_current_user
 
 router = APIRouter(prefix="/api/chats", tags=["chats"])
 
 
 def get_chat_with_messages(chat_id: int, db: Session) -> Optional[ChatWithMessages]:
-    """Получает чат с сообщениями"""
+    """Получает чат с сообщениями (исключая удаленные)"""
     chat = db.query(Chat).filter(Chat.id == chat_id).first()
     if not chat:
         return None
     
-    messages = db.query(Message).filter(Message.chat_id == chat_id).order_by(Message.created_at).all()
+    messages = db.query(Message).filter(
+        Message.chat_id == chat_id,
+        Message.deleted == False
+    ).order_by(Message.created_at).all()
     
     chat_dict = {
         "id": chat.id,
@@ -47,12 +51,19 @@ async def get_chats(
     
     result = []
     for chat in chats:
-        # Подсчитываем сообщения
-        message_count = db.query(func.count(Message.id)).filter(Message.chat_id == chat.id).scalar() or 0
+        # Подсчитываем сообщения (исключая удаленные)
+        message_count = db.query(func.count(Message.id)).filter(
+            Message.chat_id == chat.id,
+            Message.deleted == False
+        ).scalar() or 0
         
-        # Получаем последнее сообщение ассистента
+        # Получаем последнее сообщение ассистента (исключая удаленные)
         last_message_obj = db.query(Message)\
-            .filter(Message.chat_id == chat.id, Message.role == "assistant")\
+            .filter(
+                Message.chat_id == chat.id,
+                Message.role == "assistant",
+                Message.deleted == False
+            )\
             .order_by(desc(Message.created_at))\
             .first()
         
@@ -64,10 +75,13 @@ async def get_chats(
             if len(last_message) > 20:
                 last_message = last_message[:20] + "..."
         
-        # Получаем максимальную дату сообщения
+        # Получаем максимальную дату сообщения (исключая удаленные)
         if not last_message_at:
             last_message_at = db.query(func.max(Message.created_at))\
-                .filter(Message.chat_id == chat.id)\
+                .filter(
+                    Message.chat_id == chat.id,
+                    Message.deleted == False
+                )\
                 .scalar()
         
         chat_dict = {
@@ -96,10 +110,13 @@ async def create_chat(
     # Удаляем все пустые чаты пользователя перед созданием нового
     user_chats = db.query(Chat).filter(Chat.user_id == current_user.id).all()
     
-    # Подсчитываем сообщения для каждого чата
+    # Подсчитываем сообщения для каждого чата (исключая удаленные)
     empty_chats = []
     for chat in user_chats:
-        message_count = db.query(func.count(Message.id)).filter(Message.chat_id == chat.id).scalar()
+        message_count = db.query(func.count(Message.id)).filter(
+            Message.chat_id == chat.id,
+            Message.deleted == False
+        ).scalar()
         if message_count == 0:
             empty_chats.append(chat)
     
@@ -113,7 +130,10 @@ async def create_chat(
     updated_user_chats = db.query(Chat).filter(Chat.user_id == current_user.id).all()
     still_empty_chats = []
     for chat in updated_user_chats:
-        message_count = db.query(func.count(Message.id)).filter(Message.chat_id == chat.id).scalar()
+        message_count = db.query(func.count(Message.id)).filter(
+            Message.chat_id == chat.id,
+            Message.deleted == False
+        ).scalar()
         if message_count == 0:
             still_empty_chats.append(chat)
     
@@ -191,7 +211,10 @@ async def update_chat(
     db.commit()
     db.refresh(chat)
     
-    message_count = db.query(func.count(Message.id)).filter(Message.chat_id == chat.id).scalar()
+    message_count = db.query(func.count(Message.id)).filter(
+        Message.chat_id == chat.id,
+        Message.deleted == False
+    ).scalar()
     
     return ChatResponse(
         id=chat.id,
@@ -244,11 +267,101 @@ async def create_message(
     new_message = Message(
         chat_id=chat_id,
         role=message_data.role,
-        content=message_data.content
+        content=message_data.content,
+        message_type=message_data.message_type,
+        image_url=message_data.image_url,
+        image_metadata=message_data.image_metadata
     )
     db.add(new_message)
     db.commit()
     db.refresh(new_message)
     
     return MessageResponse.model_validate(new_message)
+
+
+@router.put("/{chat_id}/messages/{message_id}", response_model=MessageResponse)
+async def update_message(
+    chat_id: int,
+    message_id: int,
+    message_update: MessageUpdate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Редактирование сообщения"""
+    chat = db.query(Chat).filter(Chat.id == chat_id).first()
+    
+    if not chat or chat.user_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Чат не найден"
+        )
+    
+    message = db.query(Message).filter(
+        Message.id == message_id,
+        Message.chat_id == chat_id,
+        Message.deleted == False
+    ).first()
+    
+    if not message:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Сообщение не найдено"
+        )
+    
+    # Только пользователь может редактировать свои сообщения
+    if message.role != "user":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Можно редактировать только свои сообщения"
+        )
+    
+    message.content = message_update.content
+    message.edited = True
+    message.edited_at = datetime.utcnow()
+    
+    db.commit()
+    db.refresh(message)
+    
+    return MessageResponse.model_validate(message)
+
+
+@router.delete("/{chat_id}/messages/{message_id}")
+async def delete_message(
+    chat_id: int,
+    message_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Удаление сообщения (soft delete)"""
+    chat = db.query(Chat).filter(Chat.id == chat_id).first()
+    
+    if not chat or chat.user_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Чат не найден"
+        )
+    
+    message = db.query(Message).filter(
+        Message.id == message_id,
+        Message.chat_id == chat_id,
+        Message.deleted == False
+    ).first()
+    
+    if not message:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Сообщение не найдено"
+        )
+    
+    # Только пользователь может удалять свои сообщения
+    if message.role != "user":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Можно удалять только свои сообщения"
+        )
+    
+    message.deleted = True
+    db.commit()
+    
+    return {"message": "Сообщение успешно удалено"}
 

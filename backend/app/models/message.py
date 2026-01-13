@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, CheckConstraint, JSON
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, CheckConstraint, JSON, Boolean
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from ..database import Base
@@ -15,6 +15,9 @@ class Message(Base):
     image_url = Column(String(500), nullable=True)  # URL изображения для сообщений типа 'image'
     image_metadata = Column(JSON, nullable=True)  # Метаданные изображения (промпты, параметры)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+    deleted = Column(Boolean, default=False, nullable=False, index=True)  # Soft delete
+    edited = Column(Boolean, default=False, nullable=False)  # Флаг редактирования
+    edited_at = Column(DateTime(timezone=True), nullable=True)  # Время последнего редактирования
     
     # Связи
     chat = relationship("Chat", back_populates="messages")

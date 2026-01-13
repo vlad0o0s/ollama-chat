@@ -57,3 +57,10 @@ logs/
 *.bak
 *.tmp
 
+# Generated images
+backend/static/images/**/*.png
+backend/static/images/**/*.jpg
+backend/static/images/**/*.jpeg
+backend/static/images/**/*.webp
+!backend/static/images/.gitkeep
+

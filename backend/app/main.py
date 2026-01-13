@@ -4,11 +4,24 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pathlib import Path
 import os
+import logging
 from .config import settings
 from .database import init_db
 from .routes import auth, chats, admin, search_chat, image_generation
 from .models.user import User
 from .database import get_db, SessionLocal
+from .utils.add_edit_delete_fields_to_messages import add_edit_delete_fields
+
+# Настройка логирования
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+
+# Устанавливаем уровень логирования для всех модулей
+logging.getLogger("app").setLevel(logging.INFO)
+logging.getLogger("uvicorn").setLevel(logging.INFO)
 
 app = FastAPI(
     title="Ollama Chat API",
@@ -38,6 +51,12 @@ async def startup_event():
     """Инициализация при запуске"""
     # Инициализация базы данных
     init_db()
+    
+    # Добавляем поля для редактирования и удаления сообщений
+    try:
+        add_edit_delete_fields()
+    except Exception as e:
+        logging.error(f"Ошибка при добавлении полей для редактирования/удаления: {e}")
     
     # Назначаем пользователя vlad0o0s администратором при запуске сервера
     db = SessionLocal()

@@ -15,10 +15,17 @@ class MessageCreate(MessageBase):
     pass
 
 
+class MessageUpdate(BaseModel):
+    content: str
+
+
 class MessageResponse(MessageBase):
     id: int
     chat_id: int
     created_at: datetime
+    deleted: bool = False
+    edited: bool = False
+    edited_at: Optional[datetime] = None
     
     model_config = {"from_attributes": True}
 
