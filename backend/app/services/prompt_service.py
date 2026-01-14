@@ -7,6 +7,7 @@ import logging
 import re
 import base64
 import asyncio
+import time
 from typing import Dict, Optional
 from ..config import settings
 from .resource_manager import resource_manager
@@ -631,7 +632,12 @@ Do not include any text before or after the JSON. Only return the JSON object.""
             }
         """
         try:
-            # Определяем формат изображения по magic bytes
+            # Сжимаем изображение перед отправкой в LLaVA, чтобы уменьшить размер запроса
+            # Это предотвращает падение Ollama из-за слишком больших запросов
+            from PIL import Image
+            from io import BytesIO
+            
+            # Определяем формат изображения по magic bytes (до сжатия)
             image_format = "png"
             if image_bytes.startswith(b'\xff\xd8\xff'):
                 image_format = "jpeg"
@@ -640,8 +646,48 @@ Do not include any text before or after the JSON. Only return the JSON object.""
             elif image_bytes.startswith(b'RIFF') and b'WEBP' in image_bytes[:12]:
                 image_format = "webp"
             
+            try:
+                image = Image.open(BytesIO(image_bytes))
+                original_width, original_height = image.size
+                
+                # Максимальный размер для LLaVA (уменьшаем до 768px для экономии памяти)
+                max_size_for_llava = 768
+                max_dimension = max(original_width, original_height)
+                
+                if max_dimension > max_size_for_llava:
+                    # Вычисляем новые размеры с сохранением пропорций
+                    if original_width > original_height:
+                        new_width = max_size_for_llava
+                        new_height = int(original_height * (max_size_for_llava / original_width))
+                    else:
+                        new_height = max_size_for_llava
+                        new_width = int(original_width * (max_size_for_llava / original_height))
+                    
+                    # Сжимаем изображение
+                    resized_image = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+                    
+                    # Сохраняем в bytes с оптимизацией
+                    output = BytesIO()
+                    # Используем JPEG для лучшего сжатия (если исходное изображение не требует прозрачности)
+                    has_transparency = image.mode in ('RGBA', 'LA') or (hasattr(image, 'info') and 'transparency' in image.info)
+                    if not has_transparency:
+                        resized_image = resized_image.convert('RGB')
+                        resized_image.save(output, format='JPEG', quality=85, optimize=True)
+                        image_format = "jpeg"
+                    else:
+                        resized_image.save(output, format='PNG', optimize=True)
+                        image_format = "png"
+                    
+                    image_bytes = output.getvalue()
+                    logger.info(f"✅ Изображение сжато для LLaVA: {original_width}x{original_height} -> {new_width}x{new_height} (размер: {len(image_bytes)} байт)")
+                else:
+                    logger.debug(f"✅ Изображение {original_width}x{original_height} не требует сжатия для LLaVA")
+            except Exception as resize_error:
+                logger.warning(f"⚠️ Не удалось сжать изображение для LLaVA: {resize_error}, используем оригинал")
+            
             # Конвертируем изображение в base64
             base64_image = base64.b64encode(image_bytes).decode('utf-8')
+            logger.debug(f"📊 Размер base64 для LLaVA: {len(base64_image)} символов")
             
             # Формируем data URL
             data_url = f"data:image/{image_format};base64,{base64_image}"
@@ -714,7 +760,30 @@ Be extremely detailed and precise. Your description will be used to transform th
             # Оцениваем требуемую VRAM для LLaVA (обычно 6-8GB для llava:13b)
             estimated_vram_mb = 6144  # 6GB для llava:13b
             
+            # Для LLaVA требуется принудительный перезапуск Ollama, чтобы освободить VRAM от gpt-oss
+            # Это гарантирует, что llava:13b сможет загрузиться без конфликтов
+            logger.info(f"🔄 LLaVA требует принудительный перезапуск Ollama для освобождения VRAM от gpt-oss...")
+            
             try:
+                # Принудительно перезапускаем Ollama перед запросом GPU для LLaVA
+                # Это остановит gpt-oss и освободит VRAM
+                api_available = await process_manager_service.check_api_available()
+                if api_available:
+                    logger.info(f"🛑 Принудительная остановка Ollama перед использованием LLaVA...")
+                    try:
+                        async with httpx.AsyncClient(timeout=10.0) as client:
+                            stop_response = await client.post(
+                                f"{process_manager_service.api_url}/process/stop",
+                                params={"service": "ollama"}
+                            )
+                            if stop_response.status_code == 200:
+                                logger.info(f"✅ Ollama остановлен, ожидание освобождения VRAM (3 секунды)...")
+                                await asyncio.sleep(3)  # Даем время на освобождение VRAM
+                            else:
+                                logger.warning(f"⚠️ Не удалось остановить Ollama: {stop_response.status_code}")
+                    except Exception as stop_error:
+                        logger.warning(f"⚠️ Ошибка при остановке Ollama: {stop_error}")
+                
                 async with await resource_manager.acquire_gpu(
                     service_type=ServiceType.OLLAMA,
                     user_id=user_id,
@@ -723,41 +792,29 @@ Be extremely detailed and precise. Your description will be used to transform th
                 ) as gpu_lock:
                     logger.info(f"🔒 GPU заблокирован для Ollama (анализ изображения через LLaVA, ID: {gpu_lock.lock_id[:8]})")
                     
-                    # Дополнительное ожидание и проверка готовности Ollama после переключения процесса
-                    logger.info(f"⏳ Ожидание готовности Ollama после переключения процесса...")
-                    await asyncio.sleep(3)  # Даем время на инициализацию
-                    
-                    # Проверяем доступность Ollama
-                    max_retries = 5
-                    retry_delay = 2
-                    ollama_ready = False
-                    
-                    for attempt in range(max_retries):
-                        if await process_manager_service.check_service_available(ServiceType.OLLAMA):
-                            ollama_ready = True
-                            logger.info(f"✅ Ollama готов к работе (попытка {attempt + 1}/{max_retries})")
-                            break
-                        else:
-                            logger.warning(f"⚠️ Попытка {attempt + 1}/{max_retries}: Ollama еще не готов, повтор через {retry_delay}s...")
-                            if attempt < max_retries - 1:
-                                await asyncio.sleep(retry_delay)
-                    
-                    if not ollama_ready:
-                        logger.error(f"❌ Ollama не готов к работе после {max_retries} попыток")
-                        return {
-                            "description": "",
-                            "success": False,
-                            "error": f"Ollama не готов к работе после {max_retries} попыток ожидания"
-                        }
+                    # Даем небольшое время на инициализацию Ollama после переключения процесса
+                    await asyncio.sleep(2)
                     
                     # Retry механизм с экспоненциальной задержкой (3 попытки)
                     max_retries = 3
                     retry_delay = 2  # Начальная задержка в секундах
                     last_error = None
                     
+                    # Увеличиваем таймаут для первого запроса, так как модель может загружаться
+                    # Первый запрос может занять больше времени из-за загрузки модели в память
+                    base_timeout = float(settings.OLLAMA_VISION_TIMEOUT)
+                    
                     for attempt in range(max_retries):
                         try:
-                            async with httpx.AsyncClient(timeout=settings.OLLAMA_VISION_TIMEOUT) as client:
+                            # Для первой попытки увеличиваем таймаут, так как модель может загружаться
+                            if attempt == 0:
+                                timeout_value = max(base_timeout, 180.0)  # Минимум 180 секунд для первой попытки
+                                logger.info(f"🔄 Первая попытка с увеличенным таймаутом {timeout_value}s (модель может загружаться)")
+                            else:
+                                timeout_value = base_timeout
+                            
+                            # httpx требует float для таймаута или объект httpx.Timeout
+                            async with httpx.AsyncClient(timeout=timeout_value) as client:
                                 # Для Ollama LLaVA формат запроса: изображение передается в поле "images" как массив base64 строк
                                 payload = {
                                     "model": settings.OLLAMA_VISION_MODEL,
@@ -775,10 +832,21 @@ Be extremely detailed and precise. Your description will be used to transform th
                                     "stream": False
                                 }
                                 
-                                response = await client.post(
-                                    f"{self.ollama_url}/api/chat",
-                                    json=payload
-                                )
+                                logger.info(f"🔄 Отправка запроса к LLaVA (попытка {attempt + 1}/{max_retries}, таймаут: {timeout_value}s, размер изображения: {len(image_bytes)} байт, размер base64: {len(base64_image)} символов)")
+                                logger.debug(f"   URL: {self.ollama_url}/api/chat")
+                                logger.debug(f"   Модель: {settings.OLLAMA_VISION_MODEL}")
+                                request_start_time = time.time()
+                                try:
+                                    response = await client.post(
+                                        f"{self.ollama_url}/api/chat",
+                                        json=payload
+                                    )
+                                    request_time = time.time() - request_start_time
+                                    logger.info(f"📊 Ответ от LLaVA получен за {request_time:.2f}s (статус: {response.status_code})")
+                                except httpx.TimeoutException as timeout_err:
+                                    request_time = time.time() - request_start_time
+                                    logger.error(f"❌ Таймаут запроса к LLaVA после {request_time:.2f}s (таймаут был {timeout_value}s)")
+                                    raise
                                 
                                 if response.status_code == 200:
                                     result = response.json()
@@ -822,12 +890,39 @@ Be extremely detailed and precise. Your description will be used to transform th
                         except httpx.TimeoutException as e:
                             last_error = f"Таймаут анализа изображения (>{settings.OLLAMA_VISION_TIMEOUT}s)"
                             logger.warning(f"⚠️ {last_error} (попытка {attempt + 1}/{max_retries})")
+                            
+                            # Проверяем, не завершился ли процесс Ollama (только для логирования)
+                            ollama_available = await process_manager_service.check_service_available(ServiceType.OLLAMA)
+                            if not ollama_available:
+                                logger.error(f"❌ Ollama недоступен после таймаута")
+                                # НЕ перезапускаем здесь - пусть Resource Manager или Process Manager управляет процессами
+                            
+                            if attempt < max_retries - 1:
+                                await asyncio.sleep(retry_delay * (2 ** attempt))  # Экспоненциальная задержка
+                                continue
+                        except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+                            last_error = f"Ошибка подключения к Ollama: {e}"
+                            logger.error(f"❌ {last_error} (попытка {attempt + 1}/{max_retries})")
+                            
+                            # Проверяем статус процесса (только для логирования)
+                            ollama_available = await process_manager_service.check_service_available(ServiceType.OLLAMA)
+                            if not ollama_available:
+                                logger.error(f"❌ Ollama недоступен")
+                                # НЕ перезапускаем здесь - пусть Resource Manager или Process Manager управляет процессами
+                            
                             if attempt < max_retries - 1:
                                 await asyncio.sleep(retry_delay * (2 ** attempt))  # Экспоненциальная задержка
                                 continue
                         except Exception as e:
                             last_error = str(e)
                             logger.warning(f"⚠️ Ошибка при анализе изображения: {e} (попытка {attempt + 1}/{max_retries})")
+                            
+                            # Проверяем статус процесса (только для логирования)
+                            ollama_available = await process_manager_service.check_service_available(ServiceType.OLLAMA)
+                            if not ollama_available:
+                                logger.error(f"❌ Ollama недоступен после ошибки")
+                                # НЕ перезапускаем здесь - пусть Resource Manager или Process Manager управляет процессами
+                            
                             if attempt < max_retries - 1:
                                 await asyncio.sleep(retry_delay * (2 ** attempt))  # Экспоненциальная задержка
                                 continue

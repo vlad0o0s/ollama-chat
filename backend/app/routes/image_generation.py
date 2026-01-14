@@ -20,6 +20,7 @@ from ..services.prompt_service import prompt_service
 from ..services.resource_manager import resource_manager
 from ..services.service_types import ServiceType
 from ..utils.image_storage import image_storage
+from ..utils.date_replacer import replace_temporal_words
 from ..config import settings
 from pydantic import BaseModel, Field
 
@@ -281,10 +282,13 @@ async def generate_image(
                 reference_image_filename = None
         
         # Шаг 3: Переводим описание в промпты через Ollama (с учетом описания изображения, если есть)
+        # Заменяем временные слова на реальную дату в описании
+        processed_description = replace_temporal_words(request.description)
+        
         logger.info(f"🔄 Перевод описания в промпты для пользователя {current_user.name}")
         prompt_start_time = time.time()
         prompt_result = await prompt_service.translate_and_enhance_prompt(
-            request.description, 
+            processed_description, 
             user_id=current_user.id,
             image_description=image_description
         )
@@ -321,7 +325,7 @@ async def generate_image(
             logger.info(f"🔄 Анализ настроек KSampler для img-to-img...")
             ksampler_start_time = time.time()
             ksampler_result = await prompt_service.analyze_img2img_settings(
-                request.description,
+                processed_description,
                 user_id=current_user.id,
                 image_description=image_description
             )
@@ -705,10 +709,13 @@ async def generate_image_stream(
                     reference_image_filename = None
             
             # Шаг 3: Переводим описание в промпты через Ollama (с учетом описания изображения, если есть)
+            # Заменяем временные слова на реальную дату в описании
+            processed_description = replace_temporal_words(request.description)
+            
             yield f"data: {json.dumps({'stage': 'translating', 'message': 'Перевод описания в промпт...', 'done': False})}\n\n"
             
             prompt_result = await prompt_service.translate_and_enhance_prompt(
-                request.description, 
+                processed_description, 
                 user_id=current_user.id,
                 image_description=image_description
             )
@@ -734,7 +741,7 @@ async def generate_image_stream(
                 yield f"data: {json.dumps({'stage': 'analyzing_settings', 'message': 'Анализ настроек генерации...', 'done': False})}\n\n"
                 
                 ksampler_result = await prompt_service.analyze_img2img_settings(
-                    request.description,
+                    processed_description,
                     user_id=current_user.id,
                     image_description=image_description
                 )

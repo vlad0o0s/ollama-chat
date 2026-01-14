@@ -1216,14 +1216,19 @@ function App() {
       
       setUploadedImage(imageData);
       
-      // Если активен режим создания изображений, также устанавливаем imageForCreation
-      if (isImageMode) {
-        setImageForCreation({
-          file: file,
-          url: e.target.result,
-          name: file.name
-        });
+      // Автоматически включаем режим создания изображений (img-to-img) при загрузке фотографии
+      // Отключаем поиск при включении режима создания изображения
+      if (useWebSearch) {
+        setUseWebSearch(false);
       }
+      setIsImageMode(true);
+      
+      // Устанавливаем изображение для создания
+      setImageForCreation({
+        file: file,
+        url: e.target.result,
+        name: file.name
+      });
     };
     reader.readAsDataURL(file);
   };
@@ -1303,6 +1308,13 @@ function App() {
       }
       const reader = new FileReader();
       reader.onload = (event) => {
+        // Автоматически включаем режим создания изображений (img-to-img) при выборе фотографии
+        // Отключаем поиск при включении режима создания изображения
+        if (useWebSearch) {
+          setUseWebSearch(false);
+        }
+        setIsImageMode(true);
+        
         setImageForCreation({
           file: file,
           url: event.target.result,
@@ -2150,7 +2162,8 @@ function App() {
         </div>
 
         {/* Aspect Ratio Selector - над input-container */}
-        {isImageMode && (
+        {/* Скрываем кнопки соотношения сторон, если загружено изображение для img-to-img */}
+        {isImageMode && !uploadedImage && !imageForCreation && (
           <div className="aspect-ratio-selector-wrapper">
             <div className="aspect-ratio-selector-container">
               <div className="aspect-ratio-buttons-group">

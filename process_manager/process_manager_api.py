@@ -71,6 +71,7 @@ def check_process_running(process_name: str) -> Tuple[bool, Optional[int]]:
         Tuple (is_running, pid)
     """
     try:
+        logger.debug(f"🔍 [CHECK_PROCESS] Проверка процесса: {process_name}")
         result = subprocess.run(
             ['tasklist', '/fi', f'imagename eq {process_name}'],
             capture_output=True,
@@ -78,97 +79,251 @@ def check_process_running(process_name: str) -> Tuple[bool, Optional[int]]:
             timeout=5
         )
         
+        logger.debug(f"📊 [CHECK_PROCESS] tasklist returncode: {result.returncode}")
+        logger.debug(f"📊 [CHECK_PROCESS] tasklist stdout длина: {len(result.stdout)} символов")
+        
         if process_name in result.stdout:
+            logger.debug(f"✅ [CHECK_PROCESS] Процесс {process_name} найден в выводе tasklist")
             # Пытаемся извлечь PID из вывода
             lines = result.stdout.split('\n')
-            for line in lines:
+            logger.debug(f"📊 [CHECK_PROCESS] Количество строк в выводе: {len(lines)}")
+            for line_num, line in enumerate(lines):
                 if process_name in line:
+                    logger.debug(f"📊 [CHECK_PROCESS] Найдена строка с процессом (строка {line_num}): {line[:100]}")
                     parts = line.split()
+                    logger.debug(f"📊 [CHECK_PROCESS] Разделенные части строки: {parts}")
                     if len(parts) >= 2:
                         try:
                             pid = int(parts[1])
+                            logger.info(f"✅ [CHECK_PROCESS] Процесс {process_name} запущен, PID: {pid}")
                             return True, pid
-                        except (ValueError, IndexError):
+                        except (ValueError, IndexError) as parse_error:
+                            logger.warning(f"⚠️ [CHECK_PROCESS] Ошибка парсинга PID из строки: {parse_error}, строка: {line}")
                             pass
+            logger.warning(f"⚠️ [CHECK_PROCESS] Процесс {process_name} найден в выводе, но не удалось извлечь PID")
             return True, None
+        else:
+            logger.debug(f"ℹ️ [CHECK_PROCESS] Процесс {process_name} не найден в выводе tasklist")
+            return False, None
+    except subprocess.TimeoutExpired:
+        logger.error(f"❌ [CHECK_PROCESS] Таймаут проверки процесса {process_name}")
         return False, None
     except Exception as e:
-        logger.error(f"Ошибка проверки процесса {process_name}: {e}")
+        logger.error(f"❌ [CHECK_PROCESS] Ошибка проверки процесса {process_name}: {type(e).__name__}: {e}")
+        import traceback
+        logger.error(f"❌ [CHECK_PROCESS] Трассировка:\n{traceback.format_exc()}")
         return False, None
 
 
 def stop_ollama() -> bool:
     """Останавливает процесс Ollama"""
     try:
-        logger.info("🛑 Остановка Ollama...")
-        result = subprocess.run(
-            ['taskkill', '/f', '/im', 'ollama.exe'],
-            capture_output=True,
-            text=True,
-            timeout=10
-        )
+        logger.info("🛑 [STOP_OLLAMA] Начало остановки Ollama...")
         
-        # taskkill возвращает код 0 если процесс найден и остановлен
-        # или код 128 если процесс не найден (это нормально)
-        if result.returncode == 0 or result.returncode == 128:
-            logger.info("✅ Ollama остановлен")
+        # Сначала проверяем, запущен ли процесс
+        logger.info("🔍 [STOP_OLLAMA] Шаг 1: Проверка существующих процессов Ollama...")
+        is_running, pid = check_process_running('ollama.exe')
+        logger.info(f"📊 [STOP_OLLAMA] Результат проверки: is_running={is_running}, pid={pid}")
+        
+        if not is_running:
+            logger.info("ℹ️ [STOP_OLLAMA] Ollama не запущен, пропускаем остановку")
             if 'ollama' in _process_pids:
+                logger.info(f"📊 [STOP_OLLAMA] Удаляем PID из _process_pids: {_process_pids.get('ollama')}")
                 del _process_pids['ollama']
             return True
-        else:
-            logger.warning(f"⚠️ Неожиданный код возврата taskkill: {result.returncode}")
+        
+        logger.info(f"🛑 [STOP_OLLAMA] Остановка Ollama (PID: {pid})...")
+        logger.info(f"📊 [STOP_OLLAMA] Текущий PID в _process_pids: {_process_pids.get('ollama')}")
+        
+        # Пробуем остановить через taskkill
+        logger.info("🔍 [STOP_OLLAMA] Шаг 2: Выполнение taskkill /f /im ollama.exe...")
+        try:
+            result = subprocess.run(
+                ['taskkill', '/f', '/im', 'ollama.exe'],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            logger.info(f"📊 [STOP_OLLAMA] taskkill завершен: returncode={result.returncode}")
+            logger.info(f"📊 [STOP_OLLAMA] taskkill stdout: {result.stdout[:200] if result.stdout else 'пусто'}")
+            if result.stderr:
+                logger.warning(f"⚠️ [STOP_OLLAMA] taskkill stderr: {result.stderr[:200]}")
+        except subprocess.TimeoutExpired:
+            logger.error(f"❌ [STOP_OLLAMA] Таймаут выполнения taskkill")
             return False
+        except Exception as taskkill_error:
+            logger.error(f"❌ [STOP_OLLAMA] Ошибка выполнения taskkill: {type(taskkill_error).__name__}: {taskkill_error}")
+            return False
+        
+        # Ждем немного, чтобы процесс завершился
+        logger.info("🔍 [STOP_OLLAMA] Шаг 3: Ожидание завершения процесса (1 секунда)...")
+        time.sleep(1)
+        
+        # Проверяем, действительно ли процесс остановлен
+        logger.info("🔍 [STOP_OLLAMA] Шаг 4: Проверка, остановлен ли процесс...")
+        is_still_running, remaining_pid = check_process_running('ollama.exe')
+        logger.info(f"📊 [STOP_OLLAMA] Результат проверки: is_still_running={is_still_running}, remaining_pid={remaining_pid}")
+        
+        if is_still_running:
+            logger.warning(f"⚠️ [STOP_OLLAMA] Ollama все еще запущен после taskkill, пробуем остановить по PID {remaining_pid}...")
+            # Пробуем остановить по PID
+            try:
+                logger.info(f"🔍 [STOP_OLLAMA] Шаг 5: Выполнение taskkill /f /pid {remaining_pid}...")
+                pid_result = subprocess.run(
+                    ['taskkill', '/f', '/pid', str(remaining_pid)],
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+                logger.info(f"📊 [STOP_OLLAMA] taskkill по PID завершен: returncode={pid_result.returncode}")
+                logger.info(f"📊 [STOP_OLLAMA] taskkill по PID stdout: {pid_result.stdout[:200] if pid_result.stdout else 'пусто'}")
+                if pid_result.stderr:
+                    logger.warning(f"⚠️ [STOP_OLLAMA] taskkill по PID stderr: {pid_result.stderr[:200]}")
+                time.sleep(1)
+            except Exception as pid_kill_error:
+                logger.error(f"❌ [STOP_OLLAMA] Ошибка остановки по PID: {type(pid_kill_error).__name__}: {pid_kill_error}")
+        
+        # Финальная проверка
+        logger.info("🔍 [STOP_OLLAMA] Шаг 6: Финальная проверка остановки процесса...")
+        is_still_running, final_pid = check_process_running('ollama.exe')
+        logger.info(f"📊 [STOP_OLLAMA] Финальная проверка: is_still_running={is_still_running}, final_pid={final_pid}")
+        
+        if is_still_running:
+            logger.error(f"❌ [STOP_OLLAMA] Не удалось остановить Ollama, процесс все еще запущен (PID: {final_pid})")
+            return False
+        
+        logger.info("✅ [STOP_OLLAMA] Ollama успешно остановлен")
+        if 'ollama' in _process_pids:
+            logger.info(f"📊 [STOP_OLLAMA] Удаляем PID из _process_pids: {_process_pids.get('ollama')}")
+            del _process_pids['ollama']
+        return True
+        
     except Exception as e:
-        logger.error(f"❌ Ошибка остановки Ollama: {e}")
+        logger.error(f"❌ [STOP_OLLAMA] Критическая ошибка остановки Ollama: {type(e).__name__}: {e}")
+        import traceback
+        logger.error(f"❌ [STOP_OLLAMA] Трассировка ошибки:\n{traceback.format_exc()}")
         return False
 
 
 def start_ollama() -> Tuple[bool, Optional[int]]:
     """Запускает процесс Ollama"""
     try:
-        logger.info("🚀 Запуск Ollama...")
+        logger.info("🚀 [START_OLLAMA] Начало запуска Ollama...")
         
         # Проверяем, не запущен ли уже
+        logger.info("🔍 [START_OLLAMA] Шаг 1: Проверка существующих процессов Ollama...")
         is_running, pid = check_process_running('ollama.exe')
+        logger.info(f"📊 [START_OLLAMA] Результат проверки: is_running={is_running}, pid={pid}")
+        
         if is_running:
-            logger.info(f"✅ Ollama уже запущен (PID: {pid})")
+            logger.info(f"ℹ️ [START_OLLAMA] Ollama уже запущен (PID: {pid}), проверяем доступность API...")
             _process_pids['ollama'] = pid
-            return True, pid
+            
+            # Проверяем, действительно ли API доступен
+            try:
+                logger.info("🔍 [START_OLLAMA] Шаг 2: Проверка доступности API существующего процесса...")
+                import httpx
+                with httpx.Client(timeout=3.0) as client:
+                    response = client.get("http://127.0.0.1:11434/api/tags")
+                    logger.info(f"📊 [START_OLLAMA] Ответ API: статус={response.status_code}")
+                    if response.status_code == 200:
+                        logger.info(f"✅ [START_OLLAMA] Ollama уже запущен и доступен (PID: {pid})")
+                        return True, pid
+                    else:
+                        logger.warning(f"⚠️ [START_OLLAMA] Ollama запущен, но API не отвечает (статус: {response.status_code}), перезапускаем...")
+                        # Останавливаем и перезапускаем
+                        stop_ollama()
+                        time.sleep(2)
+            except Exception as api_check_error:
+                logger.warning(f"⚠️ [START_OLLAMA] Ollama запущен, но API недоступен: {api_check_error}, перезапускаем...")
+                logger.error(f"❌ [START_OLLAMA] Детали ошибки API: {type(api_check_error).__name__}: {str(api_check_error)}")
+                # Останавливаем и перезапускаем
+                stop_ollama()
+                time.sleep(2)
         
         # Находим ollama.exe
+        logger.info("🔍 [START_OLLAMA] Шаг 3: Поиск исполняемого файла ollama.exe...")
+        logger.info(f"📊 [START_OLLAMA] OLLAMA_PATH из env: {OLLAMA_PATH}")
+        
         ollama_exe = None
         if OLLAMA_PATH:
             ollama_exe = Path(OLLAMA_PATH) / "ollama.exe"
+            logger.info(f"📊 [START_OLLAMA] Путь из OLLAMA_PATH: {ollama_exe}")
             if not ollama_exe.exists():
+                logger.warning(f"⚠️ [START_OLLAMA] Файл не найден по пути OLLAMA_PATH, пробуем найти в PATH...")
                 # Пробуем найти в PATH
                 ollama_exe = "ollama.exe"
+            else:
+                logger.info(f"✅ [START_OLLAMA] Файл найден: {ollama_exe}")
         else:
+            logger.info("📊 [START_OLLAMA] OLLAMA_PATH не установлен, пробуем найти в PATH...")
             # Пробуем найти в PATH
             ollama_exe = "ollama.exe"
         
+        logger.info(f"📊 [START_OLLAMA] Финальный путь к ollama.exe: {ollama_exe}")
+        
         # Устанавливаем переменные окружения
+        logger.info("🔍 [START_OLLAMA] Шаг 4: Настройка переменных окружения...")
         env = os.environ.copy()
         env['OLLAMA_ORIGINS'] = '*'
         env['OLLAMA_HOST'] = '0.0.0.0:11434'
+        logger.info(f"📊 [START_OLLAMA] Переменные окружения: OLLAMA_ORIGINS={env.get('OLLAMA_ORIGINS')}, OLLAMA_HOST={env.get('OLLAMA_HOST')}")
         
         # Запускаем процесс
+        logger.info("🔍 [START_OLLAMA] Шаг 5: Запуск процесса Ollama...")
         cwd = Path(OLLAMA_PATH) if OLLAMA_PATH else None
-        process = subprocess.Popen(
-            [str(ollama_exe), 'serve'],
-            env=env,
-            cwd=cwd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
-        )
+        logger.info(f"📊 [START_OLLAMA] Рабочая директория: {cwd}")
+        logger.info(f"📊 [START_OLLAMA] Команда запуска: {ollama_exe} serve")
+        
+        try:
+            process = subprocess.Popen(
+                [str(ollama_exe), 'serve'],
+                env=env,
+                cwd=cwd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+            logger.info(f"✅ [START_OLLAMA] Процесс запущен, PID: {process.pid}")
+            logger.info(f"📊 [START_OLLAMA] Статус процесса: returncode={process.returncode}")
+        except FileNotFoundError as fnf_error:
+            logger.error(f"❌ [START_OLLAMA] Файл не найден: {fnf_error}")
+            logger.error(f"❌ [START_OLLAMA] Путь, который пытались использовать: {ollama_exe}")
+            return False, None
+        except PermissionError as perm_error:
+            logger.error(f"❌ [START_OLLAMA] Ошибка прав доступа: {perm_error}")
+            return False, None
+        except Exception as start_error:
+            logger.error(f"❌ [START_OLLAMA] Ошибка запуска процесса: {type(start_error).__name__}: {start_error}")
+            return False, None
         
         _process_pids['ollama'] = process.pid
-        logger.info(f"✅ Ollama запущен (PID: {process.pid})")
+        logger.info(f"✅ [START_OLLAMA] PID сохранен в _process_pids: {_process_pids.get('ollama')}")
+        
+        # Проверяем, что процесс действительно запустился
+        logger.info("🔍 [START_OLLAMA] Шаг 6: Проверка статуса запущенного процесса...")
+        time.sleep(1)  # Даем время процессу запуститься
+        process_status = process.poll()
+        logger.info(f"📊 [START_OLLAMA] Статус процесса после запуска: poll()={process_status} (None=работает, число=завершен)")
+        
+        if process_status is not None:
+            # Процесс завершился сразу после запуска
+            logger.error(f"❌ [START_OLLAMA] Процесс завершился сразу после запуска! Код возврата: {process_status}")
+            try:
+                stdout, stderr = process.communicate(timeout=5)
+                if stdout:
+                    logger.error(f"❌ [START_OLLAMA] STDOUT процесса: {stdout.decode('utf-8', errors='ignore')[:500]}")
+                if stderr:
+                    logger.error(f"❌ [START_OLLAMA] STDERR процесса: {stderr.decode('utf-8', errors='ignore')[:500]}")
+            except Exception as comm_error:
+                logger.error(f"❌ [START_OLLAMA] Ошибка чтения вывода процесса: {comm_error}")
+            return False, None
         
         # Ждем инициализацию и проверяем доступность
-        logger.info("⏳ Ожидание инициализации Ollama...")
+        logger.info("🔍 [START_OLLAMA] Шаг 7: Ожидание инициализации Ollama (3 секунды)...")
         time.sleep(3)
         
         # Проверяем доступность Ollama API
+        logger.info("🔍 [START_OLLAMA] Шаг 8: Проверка доступности Ollama API...")
         max_wait = 15  # Максимум 15 секунд на проверку
         check_interval = 1
         elapsed = 0
@@ -176,22 +331,47 @@ def start_ollama() -> Tuple[bool, Optional[int]]:
         while elapsed < max_wait:
             try:
                 import httpx
+                logger.info(f"📊 [START_OLLAMA] Попытка подключения к API (попытка {elapsed + 1}/{max_wait})...")
                 with httpx.Client(timeout=2.0) as client:
                     response = client.get("http://127.0.0.1:11434/api/tags")
+                    logger.info(f"📊 [START_OLLAMA] Ответ API: статус={response.status_code}")
                     if response.status_code == 200:
-                        logger.info(f"✅ Ollama доступен (PID: {process.pid})")
+                        logger.info(f"✅ [START_OLLAMA] Ollama доступен (PID: {process.pid}, время ожидания: {elapsed}s)")
                         return True, process.pid
-            except:
-                pass
+                    else:
+                        logger.warning(f"⚠️ [START_OLLAMA] API вернул статус {response.status_code}, продолжаем ожидание...")
+            except httpx.ConnectError as conn_error:
+                logger.debug(f"🔍 [START_OLLAMA] Ошибка подключения (попытка {elapsed + 1}): {conn_error}")
+            except httpx.TimeoutException as timeout_error:
+                logger.debug(f"🔍 [START_OLLAMA] Таймаут подключения (попытка {elapsed + 1}): {timeout_error}")
+            except Exception as api_error:
+                logger.warning(f"⚠️ [START_OLLAMA] Ошибка проверки API (попытка {elapsed + 1}): {type(api_error).__name__}: {api_error}")
             
             elapsed += check_interval
             if elapsed < max_wait:
                 time.sleep(check_interval)
         
-        logger.warning("⚠️ Ollama запущен, но API не отвечает после ожидания")
+        # Проверяем статус процесса после таймаута
+        process_status_after = process.poll()
+        logger.warning(f"⚠️ [START_OLLAMA] Таймаут ожидания API. Статус процесса: poll()={process_status_after}")
+        if process_status_after is not None:
+            logger.error(f"❌ [START_OLLAMA] Процесс завершился во время ожидания! Код возврата: {process_status_after}")
+            try:
+                stdout, stderr = process.communicate(timeout=5)
+                if stdout:
+                    logger.error(f"❌ [START_OLLAMA] STDOUT: {stdout.decode('utf-8', errors='ignore')[:500]}")
+                if stderr:
+                    logger.error(f"❌ [START_OLLAMA] STDERR: {stderr.decode('utf-8', errors='ignore')[:500]}")
+            except:
+                pass
+            return False, None
+        
+        logger.warning("⚠️ [START_OLLAMA] Ollama запущен, но API не отвечает после ожидания")
         return True, process.pid  # Возвращаем True, так как процесс запущен
     except Exception as e:
-        logger.error(f"❌ Ошибка запуска Ollama: {e}")
+        logger.error(f"❌ [START_OLLAMA] Критическая ошибка запуска Ollama: {type(e).__name__}: {e}")
+        import traceback
+        logger.error(f"❌ [START_OLLAMA] Трассировка ошибки:\n{traceback.format_exc()}")
         return False, None
 
 
@@ -645,29 +825,88 @@ async def switch_process(
     start_time = time.time()
     previous_service = _current_service.value if _current_service else None
     
+    logger.info(f"🔄 [SWITCH_PROCESS] ========== НАЧАЛО ПЕРЕКЛЮЧЕНИЯ ==========")
+    logger.info(f"📊 [SWITCH_PROCESS] Текущий сервис: {previous_service}")
+    logger.info(f"📊 [SWITCH_PROCESS] Целевой сервис: {service.value}")
+    logger.info(f"📊 [SWITCH_PROCESS] Время начала: {time.strftime('%H:%M:%S')}")
+    
     try:
         if service == ServiceType.OLLAMA:
+            logger.info("🔄 [SWITCH_PROCESS] Переключение на Ollama...")
+            
             # Останавливаем ComfyUI (всегда, даже если не отслежен)
-            comfyui_running, _ = check_comfyui_running()
+            logger.info("🔍 [SWITCH_PROCESS] Шаг 1: Проверка ComfyUI...")
+            comfyui_running, comfyui_pid = check_comfyui_running()
+            logger.info(f"📊 [SWITCH_PROCESS] ComfyUI запущен: {comfyui_running}, PID: {comfyui_pid}")
             if comfyui_running:
-                logger.info("🛑 Остановка ComfyUI перед переключением на Ollama...")
-                stop_comfyui()
+                logger.info("🛑 [SWITCH_PROCESS] Остановка ComfyUI перед переключением на Ollama...")
+                stop_result = stop_comfyui()
+                logger.info(f"📊 [SWITCH_PROCESS] Результат остановки ComfyUI: {stop_result}")
                 # Даем время на остановку
+                logger.info("⏳ [SWITCH_PROCESS] Ожидание остановки ComfyUI (2 секунды)...")
                 time.sleep(2)
             
-            # Также останавливаем Ollama, если он уже запущен (для перезапуска)
-            ollama_running, _ = check_process_running('ollama.exe')
-            if ollama_running and _current_service != ServiceType.OLLAMA:
-                logger.info("🛑 Остановка текущего Ollama для перезапуска...")
-                stop_ollama()
-                time.sleep(1)
+            # Проверяем, запущена ли Ollama и доступна ли она
+            logger.info("🔍 [SWITCH_PROCESS] Шаг 2: Проверка текущего состояния Ollama...")
+            ollama_running, ollama_pid = check_process_running('ollama.exe')
+            logger.info(f"📊 [SWITCH_PROCESS] Ollama запущен: {ollama_running}, PID: {ollama_pid}")
+            
+            # Проверяем доступность Ollama API
+            ollama_available = False
+            if ollama_running:
+                try:
+                    import httpx
+                    with httpx.Client(timeout=3.0) as client:
+                        response = client.get("http://127.0.0.1:11434/api/tags")
+                        if response.status_code == 200:
+                            ollama_available = True
+                            logger.info("✅ [SWITCH_PROCESS] Ollama уже запущена и доступна, пропускаем перезапуск")
+                except Exception as e:
+                    logger.warning(f"⚠️ [SWITCH_PROCESS] Ollama запущена, но API недоступна: {e}")
+            
+            # Если Ollama уже запущена и доступна, просто обновляем состояние
+            if ollama_available:
+                _current_service = ServiceType.OLLAMA
+                switch_time = time.time() - start_time
+                logger.info(f"✅ [SWITCH_PROCESS] ========== OLLAMA УЖЕ АКТИВНА ==========")
+                logger.info(f"📊 [SWITCH_PROCESS] Время проверки: {switch_time:.2f}s")
+                logger.info(f"📊 [SWITCH_PROCESS] PID процесса: {ollama_pid}")
+                return SwitchResponse(
+                    success=True,
+                    message="Ollama уже активна",
+                    previous_service=previous_service,
+                    current_service="ollama",
+                    switch_time=switch_time
+                )
+            
+            # Если Ollama не запущена или недоступна, запускаем/перезапускаем
+            if ollama_running:
+                logger.info("🛑 [SWITCH_PROCESS] Ollama запущена, но недоступна. Остановка перед перезапуском...")
+                stop_result = stop_ollama()
+                logger.info(f"📊 [SWITCH_PROCESS] Результат остановки Ollama: {stop_result}")
+                # Даем время на полную остановку
+                logger.info("⏳ [SWITCH_PROCESS] Ожидание остановки Ollama (2 секунды)...")
+                time.sleep(2)
+                
+                # Проверяем, что Ollama действительно остановлен
+                ollama_still_running, still_running_pid = check_process_running('ollama.exe')
+                if ollama_still_running:
+                    logger.warning("⚠️ [SWITCH_PROCESS] Ollama все еще запущен после остановки, ждем еще...")
+                    time.sleep(2)
+                    stop_ollama()
+                    time.sleep(1)
             
             # Запускаем Ollama
+            logger.info("🔍 [SWITCH_PROCESS] Шаг 3: Запуск Ollama...")
             success, pid = start_ollama()
+            logger.info(f"📊 [SWITCH_PROCESS] Результат запуска Ollama: success={success}, pid={pid}")
+            
             if success:
                 _current_service = ServiceType.OLLAMA
                 switch_time = time.time() - start_time
-                logger.info(f"✅ Переключено на Ollama за {switch_time:.2f}s")
+                logger.info(f"✅ [SWITCH_PROCESS] ========== ПЕРЕКЛЮЧЕНО НА OLLAMA ==========")
+                logger.info(f"📊 [SWITCH_PROCESS] Время переключения: {switch_time:.2f}s")
+                logger.info(f"📊 [SWITCH_PROCESS] PID процесса: {pid}")
                 return SwitchResponse(
                     success=True,
                     message="Переключено на Ollama",
@@ -676,6 +915,8 @@ async def switch_process(
                     switch_time=switch_time
                 )
             else:
+                logger.error(f"❌ [SWITCH_PROCESS] ========== ОШИБКА ПЕРЕКЛЮЧЕНИЯ НА OLLAMA ==========")
+                logger.error(f"❌ [SWITCH_PROCESS] start_ollama() вернул success=False, pid={pid}")
                 raise HTTPException(status_code=500, detail="Не удалось запустить Ollama")
                 
         elif service == ServiceType.COMFYUI:
@@ -688,6 +929,13 @@ async def switch_process(
                 stop_ollama()
                 # Даем время на остановку
                 time.sleep(2)
+                
+                # Проверяем, что Ollama действительно остановлен
+                ollama_still_running, _ = check_process_running('ollama.exe')
+                if ollama_still_running:
+                    logger.warning("⚠️ Ollama все еще запущен после остановки, пробуем еще раз...")
+                    stop_ollama()
+                    time.sleep(2)
             else:
                 logger.info("ℹ️ Ollama не запущен, пропускаем остановку")
             
@@ -726,7 +974,11 @@ async def switch_process(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"❌ Ошибка переключения процесса: {e}")
+        logger.error(f"❌ [SWITCH_PROCESS] ========== КРИТИЧЕСКАЯ ОШИБКА ПЕРЕКЛЮЧЕНИЯ ==========")
+        logger.error(f"❌ [SWITCH_PROCESS] Тип ошибки: {type(e).__name__}")
+        logger.error(f"❌ [SWITCH_PROCESS] Сообщение: {str(e)}")
+        import traceback
+        logger.error(f"❌ [SWITCH_PROCESS] Трассировка:\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Ошибка переключения: {str(e)}")
 
 

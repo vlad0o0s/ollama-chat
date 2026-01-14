@@ -152,7 +152,9 @@ class ResourceManager:
             # Проверяем, можем ли сразу получить блокировку
             if self._gpu_lock is None:
                 # Сначала переключаем процесс на нужный сервис (это освободит VRAM)
-                await self._switch_process_if_needed(service_type)
+                # Для LLaVA требуется принудительный перезапуск Ollama (чтобы освободить VRAM от gpt-oss)
+                force_restart = False
+                await self._switch_process_if_needed(service_type, force_restart=force_restart)
                 
                 # После переключения процесса проверяем доступность VRAM
                 # Даем немного времени на освобождение VRAM после остановки процесса
@@ -181,6 +183,7 @@ class ResourceManager:
             logger.info(f"📋 Запрос добавлен в очередь (позиция: {queue_position}, ID: {request.request_id[:8]})")
         
         # Ждем освобождения GPU или таймаута
+        wait_start = time.time()  # Инициализируем в начале для использования в except блоке
         try:
             # Ждем освобождения VRAM, если она перегружена (только если не в fallback режиме)
             if not self._fallback_mode and not vram_monitor.is_vram_available(required_vram_mb):
@@ -192,10 +195,13 @@ class ResourceManager:
                         self._queue = [r for r in self._queue if r.request_id != request.request_id]
                         if request.request_id in self._wait_conditions:
                             del self._wait_conditions[request.request_id]
+                    
+                    wait_time = time.time() - wait_start
+                    self._total_timeouts += 1
+                    logger.warning(f"⚠️ Таймаут ожидания VRAM ({timeout}s) для {service_type.value} (ID: {request.request_id[:8]}, всего таймаутов: {self._total_timeouts})")
                     raise TimeoutError(f"Таймаут ожидания VRAM ({timeout}s)")
             
             # Ждем освобождения GPU
-            wait_start = time.time()
             await asyncio.wait_for(wait_event.wait(), timeout=timeout)
             
             async with self._lock:
@@ -387,12 +393,13 @@ class ResourceManager:
             # Если нет event loop, создаем новый
             return asyncio.run(_get_status())
     
-    async def _switch_process_if_needed(self, service_type: ServiceType):
+    async def _switch_process_if_needed(self, service_type: ServiceType, force_restart: bool = False):
         """
         Переключает процесс на нужный сервис, если требуется
         
         Args:
             service_type: Тип сервиса для переключения
+            force_restart: Если True, принудительно перезапускает сервис (для смены модели в Ollama)
         """
         # Проверяем доступность Process Management API
         api_available = await process_manager_service.check_api_available()
@@ -402,8 +409,11 @@ class ResourceManager:
         
         # Переключаем процесс
         try:
-            logger.info(f"🔄 Переключение процесса на {service_type.value}...")
-            success = await process_manager_service.switch_to_service(service_type)
+            if force_restart:
+                logger.info(f"🔄 Переключение процесса на {service_type.value} (принудительный перезапуск)...")
+            else:
+                logger.info(f"🔄 Переключение процесса на {service_type.value}...")
+            success = await process_manager_service.switch_to_service(service_type, force_restart=force_restart)
             if success:
                 logger.info(f"✅ Процесс переключен на {service_type.value}")
             else:

@@ -19,6 +19,7 @@ from ..services.search_service import search_service
 from ..services.resource_manager import resource_manager
 from ..services.service_types import ServiceType
 from ..config import settings
+from ..utils.date_replacer import replace_temporal_words
 import logging
 
 logger = logging.getLogger(__name__)
@@ -50,7 +51,10 @@ async def chat_with_search(
             detail="Чат не найден"
         )
     
-    # Сохраняем сообщение пользователя
+    # Заменяем временные слова на реальную дату в сообщении пользователя
+    processed_message = replace_temporal_words(request.message)
+    
+    # Сохраняем оригинальное сообщение пользователя (без замены даты)
     user_message = Message(
         chat_id=request.chat_id,
         role="user",
@@ -116,10 +120,10 @@ async def chat_with_search(
                     "content": msg.content
                 })
         
-        # Добавляем контекст поиска и текущий вопрос
+        # Добавляем контекст поиска и текущий вопрос (с замененной датой)
         messages_for_llm.append({
             "role": "user",
-            "content": search_context + f"\n\nВопрос пользователя: {request.message}"
+            "content": search_context + f"\n\nВопрос пользователя: {processed_message}"
         })
     else:
         # Добавляем предыдущие сообщения
@@ -130,10 +134,10 @@ async def chat_with_search(
                     "content": msg.content
                 })
         
-        # Добавляем текущее сообщение
+        # Добавляем текущее сообщение (с замененной датой)
         messages_for_llm.append({
             "role": "user",
-            "content": request.message
+            "content": processed_message
         })
     
     # Создаем потоковый ответ

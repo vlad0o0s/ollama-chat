@@ -83,12 +83,14 @@ class ProcessManagerService:
         else:
             return None
     
-    async def switch_to_service(self, service_type: ServiceType) -> bool:
+    async def switch_to_service(self, service_type: ServiceType, force_restart: bool = False) -> bool:
         """
         Переключает на указанный сервис
         
         Args:
             service_type: Тип сервиса для переключения
+            force_restart: Если True, принудительно перезапускает сервис (даже если уже активен)
+                          Используется для смены модели в Ollama (например, gpt-oss -> llava)
             
         Returns:
             True если переключение успешно, False в противном случае
@@ -108,17 +110,45 @@ class ProcessManagerService:
         if not self._service_before_request:
             self._service_before_request = await self.get_current_service()
         
-        # Если уже переключен на нужный сервис, проверяем доступность
-        if self._current_service == service_type:
-            logger.info(f"✅ Уже переключено на {service_type.value}, проверяем доступность...")
+        # Проверяем текущий активный сервис через Process Manager API
+        current_active_service = await self.get_current_service()
+        
+        # Если нужный сервис уже активен и доступен, и не требуется принудительный перезапуск
+        if current_active_service == service_type and not force_restart:
+            logger.info(f"✅ {service_type.value} уже активен, проверяем доступность...")
             if await self.check_service_available(service_type):
+                # Обновляем внутреннее состояние
+                self._current_service = service_type
+                logger.info(f"✅ {service_type.value} активен и доступен, пропускаем переключение")
                 return True
             else:
-                logger.warning(f"⚠️ {service_type.value} переключен, но недоступен, повторное переключение...")
+                logger.warning(f"⚠️ {service_type.value} активен, но недоступен, требуется перезапуск...")
+        elif force_restart and current_active_service == service_type:
+            logger.info(f"🔄 Принудительный перезапуск {service_type.value} (для смены модели)...")
         
         try:
             service_name = service_type.value
             logger.info(f"🔄 Переключение на {service_name}...")
+            
+            # Если требуется принудительный перезапуск, сначала останавливаем сервис
+            if force_restart and service_type == ServiceType.OLLAMA:
+                logger.info(f"🛑 Принудительная остановка Ollama перед перезапуском (для смены модели)...")
+                try:
+                    async with httpx.AsyncClient(timeout=10.0) as client:
+                        stop_response = await client.post(
+                            f"{self.api_url}/process/stop",
+                            params={"service": "ollama"}
+                        )
+                        if stop_response.status_code == 200:
+                            logger.info(f"✅ Ollama остановлен, ожидание освобождения VRAM...")
+                            await asyncio.sleep(3)  # Даем время на освобождение VRAM
+                            # Сбрасываем текущий сервис, чтобы гарантировать перезапуск
+                            self._current_service = None
+                        else:
+                            logger.warning(f"⚠️ Не удалось остановить Ollama перед перезапуском: {stop_response.status_code}")
+                except Exception as stop_error:
+                    logger.warning(f"⚠️ Ошибка при остановке Ollama перед перезапуском: {stop_error}")
+                    # Продолжаем переключение, возможно процесс уже остановлен
             
             async with httpx.AsyncClient(timeout=self.switch_timeout) as client:
                 response = await client.post(
@@ -135,11 +165,18 @@ class ProcessManagerService:
                     self._previous_service = self._current_service
                     self._current_service = service_type
                     
-                    # Ждем готовности сервиса
-                    service_ready = await self._wait_for_service_ready(service_type)
+                    # Ждем готовности сервиса (увеличено время ожидания для надежности)
+                    service_ready = await self._wait_for_service_ready(service_type, max_wait=45)
                     if not service_ready:
                         logger.warning(f"⚠️ {service_name} переключен, но не готов после ожидания")
-                        # Продолжаем работу, возможно сервис еще инициализируется
+                        # Даем дополнительное время на инициализацию
+                        logger.info(f"⏳ Дополнительное ожидание инициализации {service_name} (5 секунд)...")
+                        await asyncio.sleep(5)
+                        # Проверяем еще раз
+                        if await self.check_service_available(service_type):
+                            logger.info(f"✅ {service_name} стал доступен после дополнительного ожидания")
+                        else:
+                            logger.warning(f"⚠️ {service_name} все еще недоступен, но продолжаем работу")
                     
                     return True
                 else:

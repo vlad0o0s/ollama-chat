@@ -37,7 +37,7 @@ class Settings(BaseSettings):
     OLLAMA_URL: str = "http://192.168.10.12:11434"
     OLLAMA_DEFAULT_MODEL: str = "gpt-oss:20b"
     OLLAMA_VISION_MODEL: str = "llava:13b"  # Модель для визуального анализа изображений
-    OLLAMA_VISION_TIMEOUT: int = 30  # таймаут для визуального анализа (секунды)
+    OLLAMA_VISION_TIMEOUT: int = 120  # таймаут для визуального анализа (секунды) - увеличен для больших изображений
     
     # ComfyUI Configuration
     COMFYUI_URL: str = ""  # URL ComfyUI сервера (если пусто и используется Process Manager, будет использован http://127.0.0.1:8188)
