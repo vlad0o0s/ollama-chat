@@ -731,6 +731,40 @@ class ProcessManagerService:
             logger.exception("Детали ошибки:")
             return False
 
+    async def stop_service(self, service_type: ServiceType) -> bool:
+        """
+        Останавливает указанный сервис через Process Manager API.
+        """
+        start_time = time.monotonic()
+        if not await self.check_api_available():
+            elapsed = time.monotonic() - start_time
+            _log_with_time("warning", "⚠️ Process Manager API недоступен, остановка сервиса пропущена", elapsed)
+            return False
+
+        service_name = service_type.value
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                stop_response = await client.post(f"{self.api_url}/stop/{service_name}")
+
+                # Fallback для старого API
+                if stop_response.status_code == 404:
+                    stop_response = await client.post(
+                        f"{self.api_url}/process/stop",
+                        params={"service": service_name}
+                    )
+
+                elapsed = time.monotonic() - start_time
+                if stop_response.status_code == 200:
+                    _log_with_time("info", f"✅ Сервис {service_name} остановлен", elapsed)
+                    return True
+
+                _log_with_time("warning", f"⚠️ Не удалось остановить {service_name}: {stop_response.status_code}", elapsed)
+                return False
+        except Exception as e:
+            elapsed = time.monotonic() - start_time
+            _log_with_time("warning", f"⚠️ Ошибка при остановке {service_name}: {e}", elapsed)
+            return False
+
 
 # Глобальный экземпляр сервиса
 process_manager_service = ProcessManagerService()

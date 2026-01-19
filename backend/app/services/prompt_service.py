@@ -757,8 +757,9 @@ MANDATORY - you MUST describe:
 
 Be extremely detailed and precise. Your description will be used to transform this image, so every detail matters. Use professional English terminology."""
             
-            # Оцениваем требуемую VRAM для LLaVA (обычно 6-8GB для llava:13b)
-            estimated_vram_mb = 6144  # 6GB для llava:13b
+            # Оцениваем требуемую VRAM для LLaVA (уменьшено, чтобы не блокировать повторные запросы)
+            # 5GB обычно достаточно для llava:13b на 6GB GPU при правильном освобождении VRAM
+            estimated_vram_mb = 5120  # 5GB для llava:13b
             
             # Для LLaVA требуется принудительный перезапуск Ollama, чтобы освободить VRAM от gpt-oss
             # Это гарантирует, что llava:13b сможет загрузиться без конфликтов
@@ -946,14 +947,16 @@ Be extremely detailed and precise. Your description will be used to transform th
                 return {
                     "description": "",
                     "success": False,
-                    "error": f"Таймаут ожидания GPU: {str(e)}"
+                    "error": f"Таймаут ожидания GPU: {str(e)}",
+                    "error_type": "gpu_timeout"
                 }
             except Exception as e:
                 logger.error(f"❌ Ошибка при работе с Resource Manager (анализ изображения): {e}")
                 return {
                     "description": "",
                     "success": False,
-                    "error": f"Ошибка управления ресурсами: {str(e)}"
+                    "error": f"Ошибка управления ресурсами: {str(e)}",
+                    "error_type": "resource_error"
                 }
                 
         except Exception as e:
@@ -998,19 +1001,36 @@ USER REQUEST:
 
 You know what the current image looks like and what the user wants to change. Based on this, determine the level of transformation needed.
 
-CRITICAL FOR FLUX.1-DEV: Denoise values must be LOWER than typical models. High denoise (0.8-0.9) destroys image structure in Flux.1-dev.
+CRITICAL FOR FLUX.1-DEV: For SIGNIFICANT changes (age, face, major transformations), use denoise 0.75-0.8. For moderate changes, use 0.65-0.75.
 
 You need to determine:
-1. Denoise level (0.4-0.65): How much to change the original image
-   CRITICAL FOR FLUX.1-DEV:
-   - If changing COLORS (e.g., current image has "black" and user wants "white") = 0.55-0.65 (OPTIMAL RANGE)
-   - If changing MATERIALS (e.g., current is "metallic" and user wants "wooden") = 0.55-0.65 (OPTIMAL RANGE)
-   - If changing OBJECTS (e.g., removing or adding objects) = 0.6-0.65 (HIGH END)
-   - If changing STYLE only = 0.5-0.55 (MEDIUM)
-   - If minor adjustments = 0.4-0.5 (LOW)
+1. Denoise level (0.4-0.8): How much to change the original image
+   CRITICAL FOR FLUX.1-DEV - Determine transformation intensity:
+   - STRONG TRANSFORMATION (0.75-0.8): Fundamental characteristic changes
+     * Appearance/age modifications (any subject: people, animals, objects with age characteristics)
+     * Complete structural transformations (changing object type or major features)
+     * Complete color/material reversals (opposite colors, completely different materials)
+     * Major feature modifications (removing/adding significant elements)
    
-   IMPORTANT: For Flux.1-dev, denoise 0.6 keeps the original image structure (pose, composition) while allowing effective color and material changes.
-   DO NOT use denoise above 0.65 - it will destroy the image structure.
+   - STRONG CHANGE (0.7-0.75): Significant modifications
+     * Major color changes (dominant color replacement)
+     * Material type swaps (wood↔metal, stone↔glass, fabric↔leather, etc.)
+     * Object removal/addition (removing/adding visible objects)
+     * Significant style changes
+   
+   - MODERATE CHANGE (0.65-0.7): Moderate modifications
+     * Color tinting/adjustments (not complete replacement)
+     * Style refinements
+     * Subtle material adjustments
+   
+   - MINOR CHANGE (0.4-0.55): Subtle adjustments
+     * Quality improvements
+     * Minor corrections
+     * Slight enhancements
+   
+   IMPORTANT: For Flux.1-dev, denoise 0.75 is SAFE and provides STRONG transformations while maintaining image structure.
+   For significant changes (age, face, major color/material changes), use 0.75-0.8.
+   DEFAULT: For significant transformations, use 0.75.
    
 2. Steps (25-40): Number of sampling steps (default 30)
    - Use 25-28 for faster generation with good quality
@@ -1023,16 +1043,19 @@ You need to determine:
 
 Return ONLY valid JSON in this exact format:
 {{
-  "denoise": 0.7,
+  "denoise": 0.75,
   "steps": 30,
   "cfg": 1.0,
   "sampler_name": "euler"
 }}
 
-Examples based on current image (FOR FLUX.1-DEV):
-- Current: "black metallic fence", Request: "make it white" -> denoise: 0.6 (color change - OPTIMAL for Flux.1-dev)
-- Current: "wooden fence", Request: "make it metallic" -> denoise: 0.6 (material change - OPTIMAL for Flux.1-dev)
-- Current: "red car", Request: "change color to blue" -> denoise: 0.6 (color change - OPTIMAL for Flux.1-dev)
+Decision principles (FOR FLUX.1-DEV):
+- STRONG TRANSFORMATION (0.75-0.8): When the request requires changing fundamental characteristics (appearance, age, major structural changes, complete color/material replacement). Examples: changing age/appearance, transforming object type, complete color reversal (black->white).
+- STRONG CHANGE (0.7-0.75): When significant modifications are needed (major color changes, material swaps, object removal/addition). Examples: changing dominant color, replacing material type, removing/adding objects.
+- MODERATE CHANGE (0.65-0.7): When moderate modifications are needed (color adjustments, style changes). Examples: color tinting, style modifications.
+- MINOR CHANGE (0.4-0.55): When only subtle adjustments are needed. Examples: quality improvements, minor corrections.
+
+Analyze the request and current image to determine the transformation level needed.
 
 Do not include any text before or after the JSON. Only return the JSON object."""
             user_message = f"На основе текущего изображения и запроса пользователя определи оптимальные настройки KSampler для Flux.1-dev:\n\nТекущее изображение: {image_description}\n\nЗапрос пользователя: {description}"
@@ -1040,20 +1063,36 @@ Do not include any text before or after the JSON. Only return the JSON object.""
             system_prompt = """You are an expert in AI image generation settings for Flux.1-dev model img-to-img tasks.
 Your task is to analyze the user's description and determine optimal KSampler settings, especially the denoise level.
 
-CRITICAL FOR FLUX.1-DEV: Denoise values must be LOWER than typical models. High denoise (0.8-0.9) destroys image structure in Flux.1-dev.
+CRITICAL FOR FLUX.1-DEV: For SIGNIFICANT changes (age, face, major transformations), use denoise 0.75-0.8. For moderate changes, use 0.65-0.75.
 
 The user wants to modify an existing image based on their description. You need to determine:
-1. Denoise level (0.4-0.65): How much to change the original image
-   CRITICAL FOR FLUX.1-DEV:
-   - If changing COLORS (e.g., "сделать белый", "изменить цвет на красный", "покрасить в синий") = 0.55-0.65 (OPTIMAL RANGE)
-   - If changing MATERIALS (e.g., "деревянный", "металлический", "каменный") = 0.55-0.65 (OPTIMAL RANGE)
-   - If changing OBJECTS (e.g., "убрать", "добавить", "заменить") = 0.6-0.65 (HIGH END)
-   - If changing STYLE only = 0.5-0.55 (MEDIUM)
-   - If minor adjustments = 0.4-0.5 (LOW)
+1. Denoise level (0.4-0.8): How much to change the original image
+   CRITICAL FOR FLUX.1-DEV - Определи интенсивность трансформации:
+   - СИЛЬНАЯ ТРАНСФОРМАЦИЯ (0.75-0.8): Изменение фундаментальных характеристик
+     * Изменение внешнего вида/возраста (любой объект: люди, животные, предметы с признаками возраста)
+     * Полная структурная трансформация (изменение типа объекта или основных признаков)
+     * Полная замена цвета/материала (противоположные цвета, совершенно разные материалы)
+     * Значительные изменения признаков (удаление/добавление важных элементов)
    
-   IMPORTANT: For Flux.1-dev, denoise 0.6 keeps the original image structure (pose, composition) while allowing effective color and material changes.
-   DO NOT use denoise above 0.65 - it will destroy the image structure.
-   DEFAULT: If unsure, use 0.6 for better transformation results.
+   - СИЛЬНОЕ ИЗМЕНЕНИЕ (0.7-0.75): Значительные модификации
+     * Крупные изменения цвета (замена доминирующего цвета)
+     * Замена типа материала (дерево↔металл, камень↔стекло, ткань↔кожа и т.д.)
+     * Удаление/добавление объектов (удаление/добавление видимых объектов)
+     * Значительные изменения стиля
+   
+   - УМЕРЕННОЕ ИЗМЕНЕНИЕ (0.65-0.7): Умеренные модификации
+     * Тонирование/корректировка цвета (не полная замена)
+     * Уточнение стиля
+     * Небольшие изменения материала
+   
+   - НЕЗНАЧИТЕЛЬНОЕ ИЗМЕНЕНИЕ (0.4-0.55): Небольшие корректировки
+     * Улучшение качества
+     * Небольшие исправления
+     * Легкие улучшения
+   
+   IMPORTANT: For Flux.1-dev, denoise 0.75 is SAFE and provides STRONG transformations while maintaining image structure.
+   For significant changes (age, face, major color/material changes), use 0.75-0.8.
+   DEFAULT: For significant transformations, use 0.75.
    
 2. Steps (25-30): Number of sampling steps (default 30)
    - Use 25-28 for faster generation with good quality
@@ -1066,20 +1105,38 @@ The user wants to modify an existing image based on their description. You need 
 
 Return ONLY valid JSON in this exact format:
 {
-  "denoise": 0.6,
+  "denoise": 0.75,
   "steps": 30,
   "cfg": 1.0,
   "sampler_name": "euler"
 }
 
-Examples (FOR FLUX.1-DEV):
-- "сделать белый забор" -> denoise: 0.6 (color change - OPTIMAL for Flux.1-dev)
-- "покрасить в красный" -> denoise: 0.6 (color change - OPTIMAL for Flux.1-dev)
-- "изменить цвет на синий" -> denoise: 0.6 (color change - OPTIMAL for Flux.1-dev)
-- "убрать дерево" -> denoise: 0.6 (object removal)
-- "добавить облака" -> denoise: 0.6 (object addition)
-- "деревянный забор" -> denoise: 0.6 (material change)
-- "немного улучшить качество" -> denoise: 0.45 (minor change)
+Decision principles (FOR FLUX.1-DEV):
+Analyze the request to determine the transformation intensity:
+
+- STRONG TRANSFORMATION (0.75-0.8): Requests that require changing fundamental characteristics:
+  * Appearance/age changes (younger, older, different appearance)
+  * Complete structural transformations (object type changes)
+  * Complete color/material reversals (opposite colors, completely different materials)
+  * Major feature modifications (removing/adding significant elements)
+
+- STRONG CHANGE (0.7-0.75): Requests that require significant modifications:
+  * Major color changes (dominant color replacement)
+  * Material type swaps (wood to metal, stone to glass, etc.)
+  * Object removal/addition (removing/adding visible objects)
+  * Significant style changes
+
+- MODERATE CHANGE (0.65-0.7): Requests that require moderate modifications:
+  * Color tinting/adjustments (not complete replacement)
+  * Style refinements
+  * Subtle material adjustments
+
+- MINOR CHANGE (0.4-0.55): Requests that require only subtle adjustments:
+  * Quality improvements
+  * Minor corrections
+  * Slight enhancements
+
+Apply these principles to any request, regardless of subject (people, objects, scenes, etc.).
 
 Do not include any text before or after the JSON. Only return the JSON object."""
             user_message = f"Определи оптимальные настройки KSampler для img-to-img на основе этого описания:\n\n{description}"
@@ -1136,7 +1193,8 @@ Do not include any text before or after the JSON. Only return the JSON object.""
                                 settings_data = json.loads(content)
                                 
                                 # Валидация и нормализация значений для Flux.1-dev
-                                denoise = float(settings_data.get("denoise", 0.6))
+                                # Fallback увеличен до 0.75 для более значительных изменений
+                                denoise = float(settings_data.get("denoise", 0.75))
                                 description_lower = description.lower()
                                 
                                 # Ключевые слова для изменения возраста/лица (нужен более сильный denoise)
@@ -1146,10 +1204,12 @@ Do not include any text before or after the JSON. Only return the JSON object.""
                                     "younger", "older", "age", "wrinkle", "wrinkles", "face", "skin", "beard", "gray hair"
                                 ]
                                 
-                                # Для Flux.1-dev базовый максимум denoise: 0.65
-                                # Для изменений возраста/лица допускаем чуть выше (до 0.75), иначе изменений будет мало
-                                max_denoise = 0.75 if any(keyword in description_lower for keyword in age_keywords) else 0.65
-                                denoise = max(0.4, min(max_denoise, denoise))
+                                # Для Flux.1-dev базовый максимум denoise: 0.75 (увеличен для более значительных изменений)
+                                # Для изменений возраста/лица допускаем до 0.8 для максимального эффекта
+                                max_denoise = 0.8 if any(keyword in description_lower for keyword in age_keywords) else 0.75
+                                # Минимум также увеличен для более заметных изменений
+                                min_denoise = 0.6 if any(keyword in description_lower for keyword in age_keywords) else 0.55
+                                denoise = max(min_denoise, min(max_denoise, denoise))
                                 
                                 # Проверяем, есть ли в описании упоминание цвета
                                 color_keywords = ["белый", "красный", "синий", "черный", "зеленый", "желтый", "оранжевый",
@@ -1158,17 +1218,17 @@ Do not include any text before or after the JSON. Only return the JSON object.""
                                                  "изменить цвет", "поменять цвет", "другой цвет"]
                                 
                                 if any(keyword in description_lower for keyword in color_keywords):
-                                    # Для Flux.1-dev оптимальный denoise для изменения цвета: 0.55-0.65
-                                    denoise = max(0.55, min(0.65, denoise))
+                                    # Для Flux.1-dev оптимальный denoise для изменения цвета: 0.65-0.75 (увеличен для лучшего эффекта)
+                                    denoise = max(0.65, min(0.75, denoise))
                                     logger.info(f"🎨 Обнаружено изменение цвета в описании, установлен denoise: {denoise} (оптимально для Flux.1-dev)")
                                 
                                 # Проверяем другие значительные изменения
-                                elif denoise < 0.55:
+                                elif denoise < 0.65:
                                     significant_keywords = ["изменить", "переделать", "убрать", "добавить", 
                                                           "заменить", "сделать", "деревянный", "металлический",
                                                           "каменный", "стеклянный"]
                                     if any(keyword in description_lower for keyword in significant_keywords):
-                                        denoise = max(0.55, denoise)  # Минимум 0.55 для значительных изменений в Flux.1-dev
+                                        denoise = max(0.65, denoise)  # Минимум 0.65 для значительных изменений в Flux.1-dev
                                 
                                 steps = int(settings_data.get("steps", 30))
                                 # Для изменений возраста/лица немного увеличиваем шаги

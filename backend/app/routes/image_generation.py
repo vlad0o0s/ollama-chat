@@ -221,22 +221,31 @@ async def generate_image(
                             logger.info(f"📝 Описание изображения от LLaVA:\n{image_description}")
                         else:
                             error_msg = vision_result.get("error", "Неизвестная ошибка")
-                            logger.error(f"❌ Не удалось проанализировать изображение через LLaVA: {error_msg}")
+                            error_type = vision_result.get("error_type")
                             
-                            # Создаем сообщение об ошибке
-                            error_message = Message(
-                                chat_id=request.chat_id,
-                                role="assistant",
-                                content=f"Извините, не удалось проанализировать загруженное изображение через LLaVA. Ошибка: {error_msg}. Генерация изображения невозможна без анализа исходного изображения.",
-                                message_type="text"
-                            )
-                            db.add(error_message)
-                            db.commit()
-                            
-                            raise HTTPException(
-                                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                                detail=f"Не удалось проанализировать изображение: {error_msg}"
-                            )
+                            # Если не хватает VRAM, продолжаем без LLaVA, чтобы не блокировать повторные генерации
+                            if error_type == "gpu_timeout" or "Таймаут ожидания GPU" in error_msg:
+                                logger.warning(
+                                    f"⚠️ LLaVA недоступна из-за VRAM (пропускаем анализ, продолжаем генерацию): {error_msg}"
+                                )
+                                image_description = None
+                            else:
+                                logger.error(f"❌ Не удалось проанализировать изображение через LLaVA: {error_msg}")
+                                
+                                # Создаем сообщение об ошибке
+                                error_message = Message(
+                                    chat_id=request.chat_id,
+                                    role="assistant",
+                                    content=f"Извините, не удалось проанализировать загруженное изображение через LLaVA. Ошибка: {error_msg}. Генерация изображения невозможна без анализа исходного изображения.",
+                                    message_type="text"
+                                )
+                                db.add(error_message)
+                                db.commit()
+                                
+                                raise HTTPException(
+                                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                                    detail=f"Не удалось проанализировать изображение: {error_msg}"
+                                )
                         
                         # Получаем размеры исходного изображения и информацию о сжатии
                         from PIL import Image
@@ -333,7 +342,7 @@ async def generate_image(
             
             if ksampler_result.get("success"):
                 ksampler_settings = {
-                    "denoise": ksampler_result.get("denoise", 0.6),  # Оптимальное значение для Flux.1-dev (0.55-0.65)
+                    "denoise": ksampler_result.get("denoise", 0.75),  # Увеличен fallback для более значительных изменений в Flux.1-dev
                     "steps": ksampler_result.get("steps", 30),
                     "cfg": ksampler_result.get("cfg", 1.0),
                     "sampler_name": ksampler_result.get("sampler_name", "euler")
@@ -650,20 +659,30 @@ async def generate_image_stream(
                                 yield f"data: {json.dumps({'stage': 'image_analyzed', 'message': 'Изображение проанализировано', 'description': image_description, 'done': False})}\n\n"
                             else:
                                 error_msg = vision_result.get("error", "Неизвестная ошибка")
-                                logger.error(f"❌ Не удалось проанализировать изображение через LLaVA: {error_msg}")
+                                error_type = vision_result.get("error_type")
                                 
-                                # Создаем сообщение об ошибке
-                                error_message = Message(
-                                    chat_id=request.chat_id,
-                                    role="assistant",
-                                    content=f"Извините, не удалось проанализировать загруженное изображение через LLaVA. Ошибка: {error_msg}. Генерация изображения невозможна без анализа исходного изображения.",
-                                    message_type="text"
-                                )
-                                db.add(error_message)
-                                db.commit()
-                                
-                                yield f"data: {json.dumps({'error': f'Не удалось проанализировать изображение: {error_msg}', 'done': True})}\n\n"
-                                return
+                                # Если не хватает VRAM, продолжаем без LLaVA, чтобы не блокировать повторные генерации
+                                if error_type == "gpu_timeout" or "Таймаут ожидания GPU" in error_msg:
+                                    logger.warning(
+                                        f"⚠️ LLaVA недоступна из-за VRAM (пропускаем анализ, продолжаем генерацию): {error_msg}"
+                                    )
+                                    image_description = None
+                                    yield f"data: {json.dumps({'stage': 'llava_skipped', 'message': 'LLaVA недоступна из-за VRAM, продолжаем без анализа', 'done': False})}\n\n"
+                                else:
+                                    logger.error(f"❌ Не удалось проанализировать изображение через LLaVA: {error_msg}")
+                                    
+                                    # Создаем сообщение об ошибке
+                                    error_message = Message(
+                                        chat_id=request.chat_id,
+                                        role="assistant",
+                                        content=f"Извините, не удалось проанализировать загруженное изображение через LLaVA. Ошибка: {error_msg}. Генерация изображения невозможна без анализа исходного изображения.",
+                                        message_type="text"
+                                    )
+                                    db.add(error_message)
+                                    db.commit()
+                                    
+                                    yield f"data: {json.dumps({'error': f'Не удалось проанализировать изображение: {error_msg}', 'done': True})}\n\n"
+                                    return
                             
                             # Получаем размеры исходного изображения и информацию о сжатии
                             from PIL import Image

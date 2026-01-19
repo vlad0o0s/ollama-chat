@@ -457,6 +457,13 @@ class ResourceManager:
             # Если освобождается ComfyUI и включена настройка - всегда переключаться на Ollama
             if released_service == ServiceType.COMFYUI and self.always_restore_ollama_after_comfyui:
                 _log_with_time("info", "🔄 Освобождается ComfyUI, переключаемся на Ollama...")
+                # Освобождаем VRAM, останавливая ComfyUI, иначе Ollama может не получить память
+                try:
+                    _log_with_time("info", "🛑 Останавливаем ComfyUI для освобождения VRAM...")
+                    await process_manager_service.stop_service(ServiceType.COMFYUI)
+                except Exception as stop_error:
+                    elapsed = time.monotonic() - restore_start
+                    _log_with_time("warning", f"⚠️ Ошибка при остановке ComfyUI: {stop_error}", elapsed)
                 try:
                     success = await process_manager_service.ensure_ollama_active()
                     elapsed = time.monotonic() - restore_start

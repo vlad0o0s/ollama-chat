@@ -857,21 +857,21 @@ function App() {
         setIsSearching(true);
         setSearchSources([]);
       }
-      
-      const token = localStorage.getItem('token');
+        
+        const token = localStorage.getItem('token');
       const response = await fetch('/api/chat/search', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
-        },
-        body: JSON.stringify({
-          message: inputMessage,
-          chat_id: chatId,
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`
+          },
+          body: JSON.stringify({
+            message: inputMessage,
+            chat_id: chatId,
           use_search: useWebSearch // Передаем флаг поиска
-        }),
-        signal: controller.signal
-      });
+          }),
+          signal: controller.signal
+        });
 
       const endTime = Date.now();
       const responseTime = endTime - startTime;

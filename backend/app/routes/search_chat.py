@@ -108,6 +108,7 @@ async def chat_with_search(
             logger.info(f"✅ Сообщение пользователя подтверждено в БД (message_id: {user_message.id})")
         else:
             logger.error(f"❌ КРИТИЧНО: Сообщение пользователя не найдено после коммита! (message_id: {user_message.id})")
+            
     except Exception as e:
         logger.error(f"❌ КРИТИЧЕСКАЯ ОШИБКА при сохранении сообщения пользователя: {e}", exc_info=True)
         try:
@@ -301,7 +302,7 @@ async def chat_with_search(
                                         }
                                         yield f"data: {json.dumps(final_data, ensure_ascii=False)}\n\n"
                                         break
-                                        
+                                    
                                 except json.JSONDecodeError:
                                     continue
                                 except Exception as e:
@@ -409,4 +410,3 @@ async def chat_with_search(
             "X-Accel-Buffering": "no"
         }
     )
-

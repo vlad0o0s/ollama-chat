@@ -77,4 +77,3 @@ def init_db():
     except Exception as e:
         logger.error(f"❌ КРИТИЧЕСКАЯ ОШИБКА: Не удалось инициализировать базу данных: {e}", exc_info=True)
         raise
-

@@ -40,7 +40,7 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
         # Проверяем формат хеша
         if not hashed_password or not hashed_password.startswith(('$2a$', '$2b$', '$2y$')):
             return False
-        
+            
         # Обрезаем пароль до 72 байт (ограничение bcrypt)
         password_bytes = truncate_password_to_72_bytes(plain_password)
         
