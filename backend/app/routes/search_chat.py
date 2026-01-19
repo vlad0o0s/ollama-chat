@@ -5,9 +5,11 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from typing import Optional
+from datetime import datetime
 import httpx
 import json
 import asyncio
+from sqlalchemy.sql import func
 from ..database import get_db, SessionLocal
 from ..models.user import User
 from ..models.chat import Chat
@@ -17,6 +19,7 @@ from ..schemas.message import MessageCreate
 from ..auth.dependencies import get_current_user
 from ..services.search_service import search_service
 from ..services.resource_manager import resource_manager
+from ..services.process_manager_service import process_manager_service
 from ..services.service_types import ServiceType
 from ..config import settings
 from ..utils.date_replacer import replace_temporal_words
@@ -34,11 +37,15 @@ async def chat_with_search(
     db: Session = Depends(get_db)
 ):
     """
-    Чат с поиском в интернете
+    Чат с поиском в интернете (или без поиска)
     
-    Выполняет поиск по запросу пользователя, затем отправляет запрос в Ollama
-    с контекстом поиска для генерации ответа
+    Выполняет поиск по запросу пользователя (если включен), затем отправляет запрос в Ollama
+    с контекстом поиска для генерации ответа.
+    Сохраняет все сообщения в БД.
     """
+    # Логируем начало обработки запроса
+    logger.info(f"📨 Получен запрос на чат (chat_id: {request.chat_id}, user_id: {current_user.id}, message_length: {len(request.message)}, use_search: {request.use_search})")
+    
     # Проверяем существование чата
     chat = db.query(Chat).filter(
         Chat.id == request.chat_id,
@@ -46,23 +53,71 @@ async def chat_with_search(
     ).first()
     
     if not chat:
+        logger.error(f"❌ Чат не найден (chat_id: {request.chat_id}, user_id: {current_user.id})")
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Чат не найден"
         )
     
+    logger.info(f"✅ Чат найден (chat_id: {request.chat_id}, title: {chat.title})")
+    
     # Заменяем временные слова на реальную дату в сообщении пользователя
     processed_message = replace_temporal_words(request.message)
     
     # Сохраняем оригинальное сообщение пользователя (без замены даты)
-    user_message = Message(
-        chat_id=request.chat_id,
-        role="user",
-        content=request.message
-    )
-    db.add(user_message)
-    db.commit()
-    db.refresh(user_message)
+    logger.info(f"💾 Сохранение сообщения пользователя (chat_id: {request.chat_id}, content_length: {len(request.message)})")
+    try:
+        user_message = Message(
+            chat_id=request.chat_id,
+            role="user",
+            content=request.message
+        )
+        db.add(user_message)
+        
+        # Обновляем updated_at у чата
+        chat = db.query(Chat).filter(Chat.id == request.chat_id).first()
+        if chat:
+            # Обновляем updated_at у чата для отслеживания последней активности
+            chat.updated_at = datetime.utcnow()
+            logger.debug(f"Обновлен updated_at у чата {request.chat_id}")
+        else:
+            logger.warning(f"⚠️ Чат {request.chat_id} не найден при сохранении сообщения пользователя")
+        
+        # Принудительно сохраняем изменения
+        try:
+            db.flush()  # Отправляем изменения в БД без коммита (для получения ID)
+            logger.debug(f"Flush выполнен для сообщения пользователя, message_id: {user_message.id}")
+        except Exception as flush_error:
+            logger.error(f"❌ Ошибка при flush сообщения пользователя: {flush_error}", exc_info=True)
+            db.rollback()
+            raise
+        
+        try:
+            db.commit()  # Коммитим транзакцию
+            logger.info(f"✅ Сообщение пользователя сохранено в БД (chat_id: {request.chat_id}, message_id: {user_message.id})")
+        except Exception as commit_error:
+            logger.error(f"❌ Ошибка при commit сообщения пользователя: {commit_error}", exc_info=True)
+            db.rollback()
+            raise
+        
+        db.refresh(user_message)
+        
+        # Проверяем, что сообщение действительно сохранено
+        verify_message = db.query(Message).filter(Message.id == user_message.id).first()
+        if verify_message:
+            logger.info(f"✅ Сообщение пользователя подтверждено в БД (message_id: {user_message.id})")
+        else:
+            logger.error(f"❌ КРИТИЧНО: Сообщение пользователя не найдено после коммита! (message_id: {user_message.id})")
+    except Exception as e:
+        logger.error(f"❌ КРИТИЧЕСКАЯ ОШИБКА при сохранении сообщения пользователя: {e}", exc_info=True)
+        try:
+            db.rollback()
+        except:
+            pass
+        raise
+    
+    # ВАЖНО: Не закрываем сессию db здесь, она будет закрыта автоматически после завершения функции
+    # Но нужно убедиться, что коммит действительно произошел
     
     # Выполняем поиск, если включен
     search_metadata = None
@@ -140,9 +195,34 @@ async def chat_with_search(
             "content": processed_message
         })
     
+    # Сохраняем user_id в переменную, чтобы использовать после закрытия сессии БД
+    user_id = current_user.id
+    
     # Создаем потоковый ответ
+    logger.info(f"🔄 Начало генерации ответа для чата {request.chat_id}")
+    
     async def generate_response():
         assistant_content = ""
+        logger.info(f"📝 Генерация ответа начата (chat_id: {request.chat_id})")
+        
+        # Ollama должна быть запущена автоматически при старте backend
+        # Если она все еще недоступна, ждем немного (она может еще запускаться)
+        try:
+            ollama_available = await process_manager_service.check_service_available(ServiceType.OLLAMA)
+            if not ollama_available:
+                logger.warning("⚠️ Ollama недоступна, ожидаем запуска (до 10 секунд)...")
+                # Ждем до 10 секунд, пока Ollama запустится
+                for _ in range(5):  # 5 попыток по 2 секунды = 10 секунд
+                    await asyncio.sleep(2)
+                    ollama_available = await process_manager_service.check_service_available(ServiceType.OLLAMA)
+                    if ollama_available:
+                        logger.info("✅ Ollama стала доступна")
+                        break
+                if not ollama_available:
+                    logger.error("❌ Ollama все еще недоступна после ожидания")
+        except Exception as e:
+            logger.warning(f"⚠️ Ошибка при проверке Ollama: {e}")
+            # Продолжаем работу, возможно Ollama уже запущена
         
         # Оцениваем требуемую VRAM для Ollama (обычно 2-4GB)
         estimated_vram_mb = 3072  # 3GB для безопасности
@@ -151,7 +231,7 @@ async def chat_with_search(
         try:
             async with await resource_manager.acquire_gpu(
                 service_type=ServiceType.OLLAMA,
-                user_id=current_user.id,
+                user_id=user_id,  # Используем сохраненный user_id вместо current_user.id
                 required_vram_mb=estimated_vram_mb,
                 timeout=300
             ) as gpu_lock:
@@ -159,8 +239,13 @@ async def chat_with_search(
                 
                 try:
                     # Отправляем запрос в Ollama
-                    async with httpx.AsyncClient(timeout=300.0) as client:
+                    # Если используется Process Manager, Ollama запускается локально на 127.0.0.1:11434
+                    if settings.PROCESS_MANAGER_API_URL:
+                        ollama_url = "http://127.0.0.1:11434/api/chat"
+                    else:
                         ollama_url = f"{settings.OLLAMA_URL}/api/chat"
+                    
+                    async with httpx.AsyncClient(timeout=300.0) as client:
                         
                         payload = {
                             "model": settings.OLLAMA_DEFAULT_MODEL,
@@ -252,24 +337,68 @@ async def chat_with_search(
             yield f"data: {json.dumps(error_data, ensure_ascii=False)}\n\n"
             return
         
-        # Сохраняем ответ ассистента в БД (синхронная операция в отдельном потоке)
+        # Сохраняем ответ ассистента в БД (синхронно в отдельном потоке для надежности)
         if assistant_content:
             def save_message():
                 db_session = SessionLocal()
                 try:
+                    logger.info(f"💾 Начало сохранения сообщения ассистента в БД (chat_id: {request.chat_id}, content_length: {len(assistant_content)})")
+                    
+                    # Создаем сообщение ассистента
                     assistant_message = Message(
                         chat_id=request.chat_id,
                         role="assistant",
                         content=assistant_content
                     )
                     db_session.add(assistant_message)
+                    
+                    # Обновляем updated_at у чата
+                    chat = db_session.query(Chat).filter(Chat.id == request.chat_id).first()
+                    if chat:
+                        chat.updated_at = datetime.utcnow()
+                        logger.debug(f"Обновлен updated_at у чата {request.chat_id}")
+                    else:
+                        logger.warning(f"⚠️ Чат {request.chat_id} не найден при сохранении сообщения ассистента")
+                    
+                    # Принудительно сохраняем изменения
+                    db_session.flush()  # Отправляем изменения в БД без коммита (для получения ID)
+                    logger.debug(f"Flush выполнен, message_id: {assistant_message.id}")
+                    
+                    # Коммитим транзакцию
                     db_session.commit()
+                    logger.info(f"✅ Commit выполнен для сообщения (chat_id: {request.chat_id}, message_id: {assistant_message.id})")
+                    
+                    # Проверяем, что сообщение действительно сохранено (в новой сессии для проверки)
+                    verify_session = SessionLocal()
+                    try:
+                        saved_message = verify_session.query(Message).filter(Message.id == assistant_message.id).first()
+                        if saved_message:
+                            logger.info(f"✅ Сообщение ассистента подтверждено в БД (chat_id: {request.chat_id}, message_id: {assistant_message.id}, content_length: {len(saved_message.content)})")
+                        else:
+                            logger.error(f"❌ КРИТИЧНО: Сообщение не найдено после коммита! (chat_id: {request.chat_id}, message_id: {assistant_message.id})")
+                    finally:
+                        verify_session.close()
+                        
+                except Exception as e:
+                    logger.error(f"❌ Ошибка сохранения сообщения ассистента в БД: {e}", exc_info=True)
+                    try:
+                        db_session.rollback()
+                        logger.error(f"❌ Rollback выполнен из-за ошибки")
+                    except Exception as rollback_error:
+                        logger.error(f"❌ Ошибка при rollback: {rollback_error}")
                 finally:
-                    db_session.close()
+                    try:
+                        db_session.close()
+                    except:
+                        pass
             
-            # Выполняем сохранение в отдельном потоке
+            # Выполняем сохранение в отдельном потоке и ждем завершения
             loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, save_message)
+            try:
+                await loop.run_in_executor(None, save_message)
+                logger.info(f"✅ Сохранение сообщения ассистента завершено (chat_id: {request.chat_id})")
+            except Exception as e:
+                logger.error(f"❌ Ошибка при выполнении сохранения сообщения ассистента в потоке: {e}", exc_info=True)
     
     return StreamingResponse(
         generate_response(),

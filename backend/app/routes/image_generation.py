@@ -748,7 +748,7 @@ async def generate_image_stream(
                 
                 if ksampler_result.get("success"):
                     ksampler_settings = {
-                        "denoise": ksampler_result.get("denoise", 0.5),
+                        "denoise": ksampler_result.get("denoise", 0.75),
                         "steps": ksampler_result.get("steps", 30),
                         "cfg": ksampler_result.get("cfg", 1.0),
                         "sampler_name": ksampler_result.get("sampler_name", "euler")

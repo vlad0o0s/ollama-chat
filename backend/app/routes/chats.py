@@ -16,14 +16,20 @@ router = APIRouter(prefix="/api/chats", tags=["chats"])
 
 def get_chat_with_messages(chat_id: int, db: Session) -> Optional[ChatWithMessages]:
     """Получает чат с сообщениями (исключая удаленные)"""
+    import logging
+    logger = logging.getLogger(__name__)
+    
     chat = db.query(Chat).filter(Chat.id == chat_id).first()
     if not chat:
+        logger.warning(f"⚠️ Чат не найден в БД (chat_id: {chat_id})")
         return None
     
     messages = db.query(Message).filter(
         Message.chat_id == chat_id,
         Message.deleted == False
     ).order_by(Message.created_at).all()
+    
+    logger.debug(f"📝 Загружено сообщений из БД: {len(messages)} (chat_id: {chat_id})")
     
     chat_dict = {
         "id": chat.id,
@@ -107,66 +113,101 @@ async def create_chat(
     db: Session = Depends(get_db)
 ):
     """Создание нового чата (с удалением пустых чатов)"""
-    # Удаляем все пустые чаты пользователя перед созданием нового
-    user_chats = db.query(Chat).filter(Chat.user_id == current_user.id).all()
+    import logging
+    logger = logging.getLogger(__name__)
     
-    # Подсчитываем сообщения для каждого чата (исключая удаленные)
-    empty_chats = []
-    for chat in user_chats:
-        message_count = db.query(func.count(Message.id)).filter(
-            Message.chat_id == chat.id,
-            Message.deleted == False
-        ).scalar()
-        if message_count == 0:
-            empty_chats.append(chat)
-    
-    # Удаляем пустые чаты
-    for empty_chat in empty_chats:
-        db.delete(empty_chat)
-    
-    db.commit()
-    
-    # Дополнительная проверка - если все еще есть пустые чаты, возвращаем первый
-    updated_user_chats = db.query(Chat).filter(Chat.user_id == current_user.id).all()
-    still_empty_chats = []
-    for chat in updated_user_chats:
-        message_count = db.query(func.count(Message.id)).filter(
-            Message.chat_id == chat.id,
-            Message.deleted == False
-        ).scalar()
-        if message_count == 0:
-            still_empty_chats.append(chat)
-    
-    if still_empty_chats:
-        chat = still_empty_chats[0]
+    try:
+        logger.info(f"💾 Создание нового чата для пользователя {current_user.id}")
+        # Удаляем все пустые чаты пользователя перед созданием нового
+        user_chats = db.query(Chat).filter(Chat.user_id == current_user.id).all()
+        
+        # Подсчитываем сообщения для каждого чата (исключая удаленные)
+        empty_chats = []
+        for chat in user_chats:
+            message_count = db.query(func.count(Message.id)).filter(
+                Message.chat_id == chat.id,
+                Message.deleted == False
+            ).scalar()
+            if message_count == 0:
+                empty_chats.append(chat)
+        
+        # Удаляем пустые чаты
+        if empty_chats:
+            logger.info(f"🗑️ Удаление {len(empty_chats)} пустых чатов")
+            for empty_chat in empty_chats:
+                db.delete(empty_chat)
+            
+            try:
+                db.commit()
+                logger.info(f"✅ Пустые чаты удалены")
+            except Exception as e:
+                logger.error(f"❌ Ошибка при удалении пустых чатов: {e}", exc_info=True)
+                db.rollback()
+                raise
+        
+        # Дополнительная проверка - если все еще есть пустые чаты, возвращаем первый
+        updated_user_chats = db.query(Chat).filter(Chat.user_id == current_user.id).all()
+        still_empty_chats = []
+        for chat in updated_user_chats:
+            message_count = db.query(func.count(Message.id)).filter(
+                Message.chat_id == chat.id,
+                Message.deleted == False
+            ).scalar()
+            if message_count == 0:
+                still_empty_chats.append(chat)
+        
+        if still_empty_chats:
+            chat = still_empty_chats[0]
+            return ChatResponse(
+                id=chat.id,
+                user_id=chat.user_id,
+                title=chat.title,
+                pinned=chat.pinned,
+                created_at=chat.created_at,
+                updated_at=chat.updated_at,
+                message_count=0
+            )
+        
+        # Создаем новый чат
+        new_chat = Chat(
+            user_id=current_user.id,
+            title=chat_data.title or "Новый чат"
+        )
+        db.add(new_chat)
+        
+        try:
+            db.commit()
+            db.refresh(new_chat)
+            logger.info(f"✅ Новый чат создан (chat_id: {new_chat.id}, user_id: {current_user.id})")
+        except Exception as e:
+            logger.error(f"❌ Ошибка при создании чата: {e}", exc_info=True)
+            db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Ошибка при создании чата: {str(e)}"
+            )
+        
         return ChatResponse(
-            id=chat.id,
-            user_id=chat.user_id,
-            title=chat.title,
-            pinned=chat.pinned,
-            created_at=chat.created_at,
-            updated_at=chat.updated_at,
+            id=new_chat.id,
+            user_id=new_chat.user_id,
+            title=new_chat.title,
+            pinned=new_chat.pinned,
+            created_at=new_chat.created_at,
+            updated_at=new_chat.updated_at,
             message_count=0
         )
-    
-    # Создаем новый чат
-    new_chat = Chat(
-        user_id=current_user.id,
-        title=chat_data.title or "Новый чат"
-    )
-    db.add(new_chat)
-    db.commit()
-    db.refresh(new_chat)
-    
-    return ChatResponse(
-        id=new_chat.id,
-        user_id=new_chat.user_id,
-        title=new_chat.title,
-        pinned=new_chat.pinned,
-        created_at=new_chat.created_at,
-        updated_at=new_chat.updated_at,
-        message_count=0
-    )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ КРИТИЧЕСКАЯ ОШИБКА при создании чата: {e}", exc_info=True)
+        try:
+            db.rollback()
+        except:
+            pass
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Внутренняя ошибка сервера: {str(e)}"
+        )
 
 
 @router.get("/{chat_id}", response_model=ChatWithMessages)
@@ -176,15 +217,26 @@ async def get_chat(
     db: Session = Depends(get_db)
 ):
     """Получение чата с сообщениями"""
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    logger.info(f"📖 Запрос на получение чата (chat_id: {chat_id}, user_id: {current_user.id})")
+    
     chat = db.query(Chat).filter(Chat.id == chat_id).first()
     
     if not chat or chat.user_id != current_user.id:
+        logger.warning(f"⚠️ Чат не найден или нет доступа (chat_id: {chat_id}, user_id: {current_user.id})")
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Чат не найден"
         )
     
-    return get_chat_with_messages(chat_id, db)
+    # Получаем сообщения
+    chat_with_messages = get_chat_with_messages(chat_id, db)
+    message_count = len(chat_with_messages.messages) if chat_with_messages else 0
+    logger.info(f"✅ Чат загружен (chat_id: {chat_id}, сообщений: {message_count})")
+    
+    return chat_with_messages
 
 
 @router.put("/{chat_id}", response_model=ChatResponse)
@@ -264,19 +316,46 @@ async def create_message(
             detail="Чат не найден"
         )
     
-    new_message = Message(
-        chat_id=chat_id,
-        role=message_data.role,
-        content=message_data.content,
-        message_type=message_data.message_type,
-        image_url=message_data.image_url,
-        image_metadata=message_data.image_metadata
-    )
-    db.add(new_message)
-    db.commit()
-    db.refresh(new_message)
+    import logging
+    logger = logging.getLogger(__name__)
     
-    return MessageResponse.model_validate(new_message)
+    try:
+        logger.info(f"💾 Создание сообщения (chat_id: {chat_id}, role: {message_data.role})")
+        new_message = Message(
+            chat_id=chat_id,
+            role=message_data.role,
+            content=message_data.content,
+            message_type=message_data.message_type,
+            image_url=message_data.image_url,
+            image_metadata=message_data.image_metadata
+        )
+        db.add(new_message)
+        
+        try:
+            db.commit()
+            db.refresh(new_message)
+            logger.info(f"✅ Сообщение создано (message_id: {new_message.id}, chat_id: {chat_id})")
+        except Exception as e:
+            logger.error(f"❌ Ошибка при создании сообщения: {e}", exc_info=True)
+            db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Ошибка при создании сообщения: {str(e)}"
+            )
+        
+        return MessageResponse.model_validate(new_message)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ КРИТИЧЕСКАЯ ОШИБКА при создании сообщения: {e}", exc_info=True)
+        try:
+            db.rollback()
+        except:
+            pass
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Внутренняя ошибка сервера: {str(e)}"
+        )
 
 
 @router.put("/{chat_id}/messages/{message_id}", response_model=MessageResponse)

@@ -852,51 +852,26 @@ function App() {
       
       const startTime = Date.now();
       
-      // Используем поиск, если включен
-      let response;
+      // ВСЕГДА используем backend endpoint для сохранения сообщений в БД
       if (useWebSearch) {
         setIsSearching(true);
         setSearchSources([]);
-        
-        const token = localStorage.getItem('token');
-        response = await fetch('/api/chat/search', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${token}`
-          },
-          body: JSON.stringify({
-            message: inputMessage,
-            chat_id: chatId,
-            use_search: true
-          }),
-          signal: controller.signal
-        });
-      } else {
-        // Используем прямой запрос к Ollama (старый способ)
-        // Фильтруем удаленные сообщения и формируем массив для Ollama
-        const messagesForOllama = newMessages
-          .filter(msg => !msg.deleted && msg.role && msg.content)
-          .map(msg => ({
-            role: msg.role,
-            content: msg.content
-          }));
-        
-        response = await fetch(`${ollamaUrl}/api/chat`, {
+      }
+      
+      const token = localStorage.getItem('token');
+      const response = await fetch('/api/chat/search', {
         method: 'POST',
-        mode: 'cors',
         headers: {
           'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
         },
         body: JSON.stringify({
-          model: model,
-          messages: messagesForOllama,
-          stream: true
+          message: inputMessage,
+          chat_id: chatId,
+          use_search: useWebSearch // Передаем флаг поиска
         }),
-        signal: controller.signal,
-          timeout: 300000
+        signal: controller.signal
       });
-      }
 
       const endTime = Date.now();
       const responseTime = endTime - startTime;
@@ -965,8 +940,8 @@ function App() {
             } catch (e) {
               console.error('App: Ошибка парсинга JSON:', line, e);
             }
-          } else if (useWebSearch === false) {
-            // Старый формат Ollama (NDJSON) - только если поиск выключен
+          } else {
+            // Формат Ollama (NDJSON) - обрабатываем как fallback
             try {
               const data = JSON.parse(line);
               

@@ -6,6 +6,8 @@ import json
 import asyncio
 import logging
 import os
+import time
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 from io import BytesIO
@@ -15,6 +17,14 @@ from .resource_manager import resource_manager
 from .service_types import ServiceType
 
 logger = logging.getLogger(__name__)
+
+def _log_with_time(level: str, message: str, elapsed: Optional[float] = None):
+    """Логирует сообщение с временной меткой и опциональным временем выполнения"""
+    timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]  # HH:MM:SS.mmm
+    if elapsed is not None:
+        logger.log(getattr(logging, level.upper()), f"[{timestamp}] [{elapsed:.2f}s] {message}")
+    else:
+        logger.log(getattr(logging, level.upper()), f"[{timestamp}] {message}")
 
 
 class ComfyUIService:
@@ -514,24 +524,14 @@ class ComfyUIService:
             workflow[negative_node]["inputs"]["text"] = negative_prompt
             logger.debug(f"✅ Обновлен negative промпт в ноде {negative_node[:8]}")
         
-        # Обновляем размеры изображения (если есть соответствующие ноды)
-        size_updated = False
-        for node_id, node_data in workflow.items():
-            if isinstance(node_data, dict) and "inputs" in node_data:
-                inputs = node_data.get("inputs", {})
-                if "width" in inputs and "height" in inputs:
-                    workflow[node_id]["inputs"]["width"] = width
-                    workflow[node_id]["inputs"]["height"] = height
-                    logger.info(f"✅ Обновлены размеры в ноде {node_id[:8]}: {width}x{height}")
-                    size_updated = True
-                    break
-        
-        if not size_updated:
-            logger.debug("⚠️ Размеры не обновлены в img-to-img workflow (используются размеры исходного изображения)")
+        # В img-to-img НЕ форсируем размеры:
+        # - используются размеры изображения из LoadImage
+        # - это предотвращает искажения и конфликт с Resize/Latent нодами
+        logger.debug("ℹ️ Img-to-img: размеры не переопределяются, используются размеры загруженного изображения")
         
         # Обновляем настройки KSampler
         if ksampler_settings:
-            denoise = ksampler_settings.get("denoise", 0.5)
+            denoise = ksampler_settings.get("denoise", 0.75)
             steps = ksampler_settings.get("steps", 30)
             cfg = ksampler_settings.get("cfg", 1.0)
             requested_sampler_name = ksampler_settings.get("sampler_name", None)
@@ -691,6 +691,7 @@ class ComfyUIService:
     def _resize_image_if_needed(self, image_bytes: bytes, max_size: int = None) -> Tuple[bytes, Tuple[int, int], Tuple[int, int]]:
         """
         Автоматически сжимает изображение, если оно больше max_size по любой стороне
+        Дополнительно приводит размеры к кратным 16 (требование Flux VAE)
         
         Args:
             image_bytes: Изображение в виде bytes
@@ -709,21 +710,37 @@ class ComfyUIService:
             
             # Проверяем, нужно ли сжимать
             max_dimension = max(original_width, original_height)
-            if max_dimension <= max_size:
-                logger.debug(f"✅ Изображение {original_width}x{original_height} не требует сжатия (макс: {max_size})")
-                return (image_bytes, original_size, original_size)
+            scale = 1.0
+            if max_dimension > max_size:
+                # Вычисляем масштаб для уменьшения с сохранением пропорций
+                scale = max_size / float(max_dimension)
             
             # Вычисляем новые размеры с сохранением пропорций
-            if original_width > original_height:
-                new_width = max_size
-                new_height = int(original_height * (max_size / original_width))
-            else:
-                new_height = max_size
-                new_width = int(original_width * (max_size / original_height))
+            new_width = int(original_width * scale)
+            new_height = int(original_height * scale)
             
-            new_size = (new_width, new_height)
+            # Flux VAE требует размеры кратные 16
+            def _to_multiple_of_16(value: int) -> int:
+                return max(16, (value // 16) * 16)
+            
+            adjusted_width = _to_multiple_of_16(new_width)
+            adjusted_height = _to_multiple_of_16(new_height)
+            
+            # Если размеры не изменились вообще, возвращаем оригинал без ресайза
+            if (new_width, new_height) == (original_width, original_height) and (adjusted_width, adjusted_height) == (original_width, original_height):
+                logger.debug(f"✅ Изображение {original_width}x{original_height} не требует сжатия (макс: {max_size}) и уже кратно 16")
+                return (image_bytes, original_size, original_size)
+            
+            # Если размеры нужно подогнать под кратность 16
+            if (adjusted_width, adjusted_height) != (new_width, new_height):
+                logger.info(
+                    f"📐 Размеры приведены к кратным 16: "
+                    f"{new_width}x{new_height} -> {adjusted_width}x{adjusted_height}"
+                )
+                new_width, new_height = adjusted_width, adjusted_height
             
             # Сжимаем изображение
+            new_size = (new_width, new_height)
             resized_image = image.resize(new_size, Image.Resampling.LANCZOS)
             
             # Сохраняем в bytes
@@ -1129,6 +1146,7 @@ class ComfyUIService:
                 "reference_image_url": Optional[str]
             }
         """
+        generation_start_time = time.time()  # Инициализация времени начала генерации
         # Оцениваем требуемую VRAM (примерно 4-6GB для flux1-dev-fp8)
         # Уменьшаем требования, так как процесс будет переключен перед использованием
         estimated_vram_mb = 4096  # 4GB - после переключения процессов VRAM будет свободна
@@ -1142,19 +1160,21 @@ class ComfyUIService:
                 required_vram_mb=estimated_vram_mb,
                 timeout=self.timeout
             ) as gpu_lock:
-                logger.info(f"🔒 GPU заблокирован для ComfyUI (ID: {gpu_lock.lock_id[:8]})")
+                elapsed = time.time() - generation_start_time
+                _log_with_time("info", f"🔒 GPU заблокирован для ComfyUI (ID: {gpu_lock.lock_id[:8]})", elapsed)
                 
                 # После переключения процесса обновляем URL и проверяем подключение
-                logger.info(f"🔄 Проверка доступности ComfyUI после переключения процесса...")
-                logger.info(f"   Текущий URL: {self.base_url}")
+                check_start = time.time()
+                _log_with_time("info", f"🔄 Проверка доступности ComfyUI после переключения процесса...")
+                _log_with_time("info", f"   Текущий URL: {self.base_url}")
                 self._update_url_if_needed()
                 
-                # Даем время на запуск ComfyUI после переключения процесса
-                logger.info(f"⏳ Ожидание запуска ComfyUI (5 секунд)...")
-                await asyncio.sleep(5)
+                # Даем время на запуск ComfyUI после переключения процесса (уменьшено с 5 до 2 секунд)
+                _log_with_time("info", f"⏳ Ожидание запуска ComfyUI (2 секунды)...")
+                await asyncio.sleep(2)
                 
                 # Проверяем подключение (теперь процесс уже переключен на ComfyUI)
-                logger.info(f"🔄 Проверка подключения к ComfyUI на {self.base_url}...")
+                _log_with_time("info", f"🔄 Проверка подключения к ComfyUI на {self.base_url}...")
                 max_retries = 3
                 retry_delay = 3
                 connection_ok = False
@@ -1162,18 +1182,22 @@ class ComfyUIService:
                 for attempt in range(max_retries):
                     connection_ok = await self.check_connection()
                     if connection_ok:
+                        check_elapsed = time.time() - check_start
+                        _log_with_time("info", f"✅ ComfyUI доступен и готов к работе", check_elapsed)
                         break
                     if attempt < max_retries - 1:
-                        logger.warning(f"⚠️ Попытка {attempt + 1}/{max_retries}: ComfyUI еще не доступен, повтор через {retry_delay}s...")
+                        check_elapsed = time.time() - check_start
+                        _log_with_time("warning", f"⚠️ Попытка {attempt + 1}/{max_retries}: ComfyUI еще не доступен, повтор через {retry_delay}s...", check_elapsed)
                         await asyncio.sleep(retry_delay)
                 
                 if not connection_ok:
+                    check_elapsed = time.time() - check_start
                     error_msg = f"ComfyUI сервер недоступен на {self.base_url} после переключения процесса"
-                    logger.error(f"❌ {error_msg}")
-                    logger.error(f"   Проверьте, что ComfyUI запущен и доступен на этом адресе")
+                    _log_with_time("error", f"❌ {error_msg}", check_elapsed)
+                    _log_with_time("error", f"   Проверьте, что ComfyUI запущен и доступен на этом адресе")
                     if settings.PROCESS_MANAGER_API_URL:
-                        logger.error(f"   Process Manager настроен: {settings.PROCESS_MANAGER_API_URL}")
-                        logger.error(f"   Проверьте логи Process Manager для деталей запуска ComfyUI")
+                        _log_with_time("error", f"   Process Manager настроен: {settings.PROCESS_MANAGER_API_URL}")
+                        _log_with_time("error", f"   Проверьте логи Process Manager для деталей запуска ComfyUI")
                     return {
                         "success": False,
                         "image": None,
@@ -1181,8 +1205,6 @@ class ComfyUIService:
                         "prompt_id": None,
                         "error": error_msg
                     }
-                
-                logger.info(f"✅ ComfyUI доступен и готов к работе")
                 
                 # Если есть изображение для загрузки, загружаем его сейчас (после переключения процесса)
                 if reference_image_bytes and reference_image_filename and not reference_image_path:
@@ -1277,10 +1299,12 @@ class ComfyUIService:
                         "reference_image_url": None
                     }
                 
-                logger.info(f"✅ Промпты прошли валидацию (длина: {prompt_validation['length']} и {negative_prompt_validation['length']} символов)")
+                elapsed = time.time() - generation_start_time
+                _log_with_time("info", f"✅ Промпты прошли валидацию (длина: {prompt_validation['length']} и {negative_prompt_validation['length']} символов)", elapsed)
                 
                 # Создаем workflow
-                logger.info(f"🔄 Создание workflow с размерами: {width}x{height}")
+                workflow_start = time.time()
+                _log_with_time("info", f"🔄 Создание workflow с размерами: {width}x{height}")
                 workflow = self.create_workflow(
                     prompt, 
                     negative_prompt, 
@@ -1289,25 +1313,34 @@ class ComfyUIService:
                     reference_image_path=reference_image_path,
                     ksampler_settings=ksampler_settings
                 )
+                workflow_elapsed = time.time() - workflow_start
+                _log_with_time("info", f"✅ Workflow создан", workflow_elapsed)
                 
                 # Проверяем, что размеры действительно установлены в workflow
-                size_found = False
-                for node_id, node_data in workflow.items():
-                    if isinstance(node_data, dict) and "inputs" in node_data:
-                        inputs = node_data.get("inputs", {})
-                        if "width" in inputs and "height" in inputs:
-                            w = inputs.get("width")
-                            h = inputs.get("height")
-                            if w == width and h == height:
-                                size_found = True
-                                logger.info(f"✅ Подтверждено: размеры {width}x{height} установлены в ноде {node_id[:8]} (класс: {node_data.get('class_type', 'unknown')})")
-                                break
-                
-                if not size_found:
-                    logger.warning(f"⚠️ Размеры {width}x{height} не найдены в workflow после создания. Проверьте шаблон.")
+                if mode == "text2img":
+                    size_found = False
+                    for node_id, node_data in workflow.items():
+                        if isinstance(node_data, dict) and "inputs" in node_data:
+                            inputs = node_data.get("inputs", {})
+                            if "width" in inputs and "height" in inputs:
+                                w = inputs.get("width")
+                                h = inputs.get("height")
+                                if w == width and h == height:
+                                    size_found = True
+                                    _log_with_time("info", f"✅ Подтверждено: размеры {width}x{height} установлены в ноде {node_id[:8]} (класс: {node_data.get('class_type', 'unknown')})")
+                                    break
+                    
+                    if not size_found:
+                        _log_with_time("warning", f"⚠️ Размеры {width}x{height} не найдены в workflow после создания. Проверьте шаблон.")
+                else:
+                    _log_with_time("info", "ℹ️ Img-to-img: проверка размеров в workflow пропущена")
                 
                 # Добавляем в очередь ComfyUI
+                queue_start = time.time()
                 prompt_id = await self.queue_prompt(workflow)
+                queue_elapsed = time.time() - queue_start
+                if prompt_id:
+                    _log_with_time("info", f"✅ Workflow добавлен в очередь, prompt_id: {prompt_id[:8]}", queue_elapsed)
                 if not prompt_id:
                     return {
                         "success": False,
@@ -1318,10 +1351,14 @@ class ComfyUIService:
                     }
                 
                 # Получаем изображение
+                image_start = time.time()
                 result = await self.get_image(prompt_id)
+                image_elapsed = time.time() - image_start
                 
                 if result:
                     image_bytes, filename = result
+                    total_elapsed = time.time() - generation_start_time
+                    _log_with_time("info", f"✅ Изображение получено: {filename} (генерация: {image_elapsed:.2f}s, всего: {total_elapsed:.2f}s)", total_elapsed)
                     
                     # Извлекаем seed из workflow для сохранения в метаданных
                     seed_used = None

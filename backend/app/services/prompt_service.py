@@ -772,10 +772,16 @@ Be extremely detailed and precise. Your description will be used to transform th
                     logger.info(f"🛑 Принудительная остановка Ollama перед использованием LLaVA...")
                     try:
                         async with httpx.AsyncClient(timeout=10.0) as client:
+                            # Новый API: /stop/ollama
                             stop_response = await client.post(
-                                f"{process_manager_service.api_url}/process/stop",
-                                params={"service": "ollama"}
+                                f"{process_manager_service.api_url}/stop/ollama"
                             )
+                            if stop_response.status_code == 404:
+                                # Фолбек для старого API
+                                stop_response = await client.post(
+                                    f"{process_manager_service.api_url}/process/stop",
+                                    params={"service": "ollama"}
+                                )
                             if stop_response.status_code == 200:
                                 logger.info(f"✅ Ollama остановлен, ожидание освобождения VRAM (3 секунды)...")
                                 await asyncio.sleep(3)  # Даем время на освобождение VRAM
@@ -1131,15 +1137,25 @@ Do not include any text before or after the JSON. Only return the JSON object.""
                                 
                                 # Валидация и нормализация значений для Flux.1-dev
                                 denoise = float(settings_data.get("denoise", 0.6))
-                                # Для Flux.1-dev максимальный denoise: 0.65 (выше разрушает структуру изображения)
-                                denoise = max(0.4, min(0.65, denoise))  # Ограничиваем диапазон 0.4-0.65 для Flux.1-dev
+                                description_lower = description.lower()
+                                
+                                # Ключевые слова для изменения возраста/лица (нужен более сильный denoise)
+                                age_keywords = [
+                                    "молод", "младше", "постар", "старше", "возраст", "омолод",
+                                    "морщин", "сед", "седин", "бород", "лицо", "кожа",
+                                    "younger", "older", "age", "wrinkle", "wrinkles", "face", "skin", "beard", "gray hair"
+                                ]
+                                
+                                # Для Flux.1-dev базовый максимум denoise: 0.65
+                                # Для изменений возраста/лица допускаем чуть выше (до 0.75), иначе изменений будет мало
+                                max_denoise = 0.75 if any(keyword in description_lower for keyword in age_keywords) else 0.65
+                                denoise = max(0.4, min(max_denoise, denoise))
                                 
                                 # Проверяем, есть ли в описании упоминание цвета
                                 color_keywords = ["белый", "красный", "синий", "черный", "зеленый", "желтый", "оранжевый",
                                                  "фиолетовый", "розовый", "коричневый", "серый", "голубой", "цвет",
                                                  "покрасить", "окрасить", "сделать белый", "сделать красный",
                                                  "изменить цвет", "поменять цвет", "другой цвет"]
-                                description_lower = description.lower()
                                 
                                 if any(keyword in description_lower for keyword in color_keywords):
                                     # Для Flux.1-dev оптимальный denoise для изменения цвета: 0.55-0.65
@@ -1155,6 +1171,9 @@ Do not include any text before or after the JSON. Only return the JSON object.""
                                         denoise = max(0.55, denoise)  # Минимум 0.55 для значительных изменений в Flux.1-dev
                                 
                                 steps = int(settings_data.get("steps", 30))
+                                # Для изменений возраста/лица немного увеличиваем шаги
+                                if any(keyword in description_lower for keyword in age_keywords):
+                                    steps = max(35, steps)
                                 steps = max(25, min(40, steps))  # Ограничиваем диапазон
                                 
                                 cfg = float(settings_data.get("cfg", 1.0))
@@ -1180,10 +1199,15 @@ Do not include any text before or after the JSON. Only return the JSON object.""
                                 logger.debug(f"Ответ от Ollama: {content[:500]}")
                                 
                                 # Fallback: используем значения по умолчанию для Flux.1-dev
-                                # Проверяем на изменение цвета
-                                color_keywords = ["белый", "красный", "синий", "черный", "зеленый", "желтый", "цвет", "покрасить"]
-                                # Для Flux.1-dev оптимальный denoise: 0.6 для цветовых изменений, 0.6 для других
-                                default_denoise = 0.6  # Оптимальное значение для Flux.1-dev
+                                # Проверяем на изменение возраста/лица
+                                description_lower = description.lower()
+                                age_keywords = [
+                                    "молод", "младше", "постар", "старше", "возраст", "омолод",
+                                    "морщин", "сед", "седин", "бород", "лицо", "кожа",
+                                    "younger", "older", "age", "wrinkle", "wrinkles", "face", "skin", "beard", "gray hair"
+                                ]
+                                # Для Flux.1-dev оптимальный denoise: 0.6, но для возраста/лица повышаем до 0.7
+                                default_denoise = 0.7 if any(keyword in description_lower for keyword in age_keywords) else 0.6
                                 return {
                                     "denoise": default_denoise,
                                     "steps": 30,

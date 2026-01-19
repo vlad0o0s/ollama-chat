@@ -6,6 +6,7 @@ import heapq
 import time
 import uuid
 import logging
+from datetime import datetime
 from typing import Dict, Optional, List
 from dataclasses import dataclass, field
 from ..config import settings
@@ -13,6 +14,14 @@ from .vram_monitor import vram_monitor
 from .service_types import ServiceType
 
 logger = logging.getLogger(__name__)
+
+def _log_with_time(level: str, message: str, elapsed: Optional[float] = None):
+    """Логирует сообщение с временной меткой и опциональным временем выполнения"""
+    timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]  # HH:MM:SS.mmm
+    if elapsed is not None:
+        logger.log(getattr(logging, level.upper()), f"[{timestamp}] [{elapsed:.2f}s] {message}")
+    else:
+        logger.log(getattr(logging, level.upper()), f"[{timestamp}] {message}")
 
 # Импортируем process_manager_service после определения ServiceType
 # чтобы избежать циклического импорта
@@ -134,8 +143,9 @@ class ResourceManager:
             required_vram_mb=required_vram_mb
         )
         
+        request_start_time = time.time()
         self._total_requests += 1
-        logger.info(f"🔄 Запрос GPU для {service_type.value} (приоритет: {priority}, ID: {request.request_id[:8]}, всего запросов: {self._total_requests})")
+        _log_with_time("info", f"🔄 Запрос GPU для {service_type.value} (приоритет: {priority}, ID: {request.request_id[:8]}, всего запросов: {self._total_requests})")
         
         # Проверяем доступность Process Manager API
         # Если Process Manager доступен, сервис будет запущен при переключении процесса
@@ -144,8 +154,9 @@ class ResourceManager:
             # Если Process Manager недоступен, проверяем доступность сервиса напрямую
             service_available = await process_manager_service.check_service_available(service_type)
             if not service_available:
+                elapsed = time.time() - request_start_time
                 error_msg = f"Сервис {service_type.value} недоступен и Process Manager API не доступен"
-                logger.error(f"❌ {error_msg}")
+                _log_with_time("error", f"❌ {error_msg}", elapsed)
                 raise RuntimeError(error_msg)
         
         async with self._lock:
@@ -154,7 +165,10 @@ class ResourceManager:
                 # Сначала переключаем процесс на нужный сервис (это освободит VRAM)
                 # Для LLaVA требуется принудительный перезапуск Ollama (чтобы освободить VRAM от gpt-oss)
                 force_restart = False
+                switch_start = time.time()
                 await self._switch_process_if_needed(service_type, force_restart=force_restart)
+                switch_elapsed = time.time() - switch_start
+                _log_with_time("info", f"🔄 Переключение процесса завершено", switch_elapsed)
                 
                 # После переключения процесса проверяем доступность VRAM
                 # Даем немного времени на освобождение VRAM после остановки процесса
@@ -169,10 +183,12 @@ class ResourceManager:
                     )
                     self._gpu_lock = lock
                     self._active_locks[lock.lock_id] = lock
-                    logger.info(f"✅ GPU выделен для {service_type.value} (ID: {request.request_id[:8]})")
+                    elapsed = time.time() - request_start_time
+                    _log_with_time("info", f"✅ GPU выделен для {service_type.value} (ID: {request.request_id[:8]})", elapsed)
                     return lock
                 else:
-                    logger.info(f"⏳ VRAM недоступна после переключения процесса, ожидание...")
+                    elapsed = time.time() - request_start_time
+                    _log_with_time("info", f"⏳ VRAM недоступна после переключения процесса, ожидание...", elapsed)
             
             # Если GPU занят, добавляем в очередь
             heapq.heappush(self._queue, request)
@@ -180,7 +196,8 @@ class ResourceManager:
             self._wait_conditions[request.request_id] = wait_event
             
             queue_position = len(self._queue)
-            logger.info(f"📋 Запрос добавлен в очередь (позиция: {queue_position}, ID: {request.request_id[:8]})")
+            elapsed = time.time() - request_start_time
+            _log_with_time("info", f"📋 Запрос добавлен в очередь (позиция: {queue_position}, ID: {request.request_id[:8]})", elapsed)
         
         # Ждем освобождения GPU или таймаута
         wait_start = time.time()  # Инициализируем в начале для использования в except блоке
@@ -212,12 +229,15 @@ class ResourceManager:
                     self._total_wait_time += wait_time
                     
                     # Переключаем процесс на нужный сервис (если еще не переключен)
+                    switch_start = time.time()
                     await self._switch_process_if_needed(service_type)
+                    switch_elapsed = time.time() - switch_start
                     
                     # Даем время на освобождение VRAM
                     await asyncio.sleep(2)
                     
-                    logger.info(f"✅ GPU получен после ожидания {wait_time:.1f}s для {service_type.value} (ID: {request.request_id[:8]}, среднее ожидание: {self._total_wait_time / max(1, self._total_requests - self._total_timeouts):.1f}s)")
+                    total_elapsed = time.time() - request.created_at
+                    _log_with_time("info", f"✅ GPU получен после ожидания {wait_time:.1f}s для {service_type.value} (ID: {request.request_id[:8]}, переключение: {switch_elapsed:.2f}s, всего: {total_elapsed:.2f}s, среднее ожидание: {self._total_wait_time / max(1, self._total_requests - self._total_timeouts):.1f}s)", total_elapsed)
                     return lock
                 else:
                     raise RuntimeError("Блокировка была отменена")
@@ -255,7 +275,7 @@ class ResourceManager:
                 usage_time = time.time() - lock.acquired_at
                 self._total_usage_time += usage_time
                 avg_usage = self._total_usage_time / max(1, self._total_requests - self._total_timeouts)
-                logger.info(f"🔓 GPU освобожден от {service_type_value} (использовано: {usage_time:.1f}s, ID: {lock_id[:8]}, среднее использование: {avg_usage:.1f}s)")
+                _log_with_time("info", f"🔓 GPU освобожден от {service_type_value} (использовано: {usage_time:.1f}s, ID: {lock_id[:8]}, среднее использование: {avg_usage:.1f}s)", usage_time)
                 
                 # Сохраняем информацию о сервисе перед освобождением
                 released_service = service_type
@@ -401,25 +421,28 @@ class ResourceManager:
             service_type: Тип сервиса для переключения
             force_restart: Если True, принудительно перезапускает сервис (для смены модели в Ollama)
         """
+        switch_start = time.time()
         # Проверяем доступность Process Management API
         api_available = await process_manager_service.check_api_available()
         if not api_available:
-            logger.warning("⚠️ Process Management API недоступен, пропускаем переключение процесса")
+            _log_with_time("warning", "⚠️ Process Management API недоступен, пропускаем переключение процесса")
             return
         
         # Переключаем процесс
         try:
             if force_restart:
-                logger.info(f"🔄 Переключение процесса на {service_type.value} (принудительный перезапуск)...")
+                _log_with_time("info", f"🔄 Переключение процесса на {service_type.value} (принудительный перезапуск)...")
             else:
-                logger.info(f"🔄 Переключение процесса на {service_type.value}...")
+                _log_with_time("info", f"🔄 Переключение процесса на {service_type.value}...")
             success = await process_manager_service.switch_to_service(service_type, force_restart=force_restart)
+            elapsed = time.time() - switch_start
             if success:
-                logger.info(f"✅ Процесс переключен на {service_type.value}")
+                _log_with_time("info", f"✅ Процесс переключен на {service_type.value}", elapsed)
             else:
-                logger.warning(f"⚠️ Не удалось переключить процесс на {service_type.value}")
+                _log_with_time("warning", f"⚠️ Не удалось переключить процесс на {service_type.value}", elapsed)
         except Exception as e:
-            logger.error(f"❌ Ошибка переключения процесса: {e}")
+            elapsed = time.time() - switch_start
+            _log_with_time("error", f"❌ Ошибка переключения процесса: {e}", elapsed)
             # Продолжаем работу даже если переключение не удалось (fallback)
     
     async def _restore_previous_process(self, released_service: ServiceType):
@@ -429,16 +452,45 @@ class ResourceManager:
         Args:
             released_service: Тип сервиса, который был освобожден
         """
+        restore_start = time.monotonic()
         try:
             # Если освобождается ComfyUI и включена настройка - всегда переключаться на Ollama
             if released_service == ServiceType.COMFYUI and self.always_restore_ollama_after_comfyui:
-                logger.info("🔄 Освобождается ComfyUI, переключаемся на Ollama...")
-                await process_manager_service.ensure_ollama_active()
+                _log_with_time("info", "🔄 Освобождается ComfyUI, переключаемся на Ollama...")
+                try:
+                    success = await process_manager_service.ensure_ollama_active()
+                    elapsed = time.monotonic() - restore_start
+                    if success:
+                        _log_with_time("info", "✅ Ollama восстановлен после ComfyUI", elapsed)
+                    else:
+                        _log_with_time("warning", "⚠️ Не удалось восстановить Ollama после ComfyUI", elapsed)
+                except Exception as restore_error:
+                    elapsed = time.monotonic() - restore_start
+                    _log_with_time("error", f"❌ Ошибка при восстановлении Ollama: {restore_error}", elapsed)
+                    logger.exception("Детали ошибки восстановления Ollama:")
+            elif released_service == ServiceType.OLLAMA:
+                # Если освобождается Ollama, проверяем, нужно ли восстанавливать предыдущий сервис
+                # Но обычно после Ollama мы хотим оставить Ollama активной для дальнейшей работы
+                elapsed = time.monotonic() - restore_start
+                _log_with_time("debug", "🔄 Освобождается Ollama, проверяем необходимость восстановления...", elapsed)
+                # Не восстанавливаем автоматически, так как Ollama обычно должна оставаться активной
+                # Если нужен другой сервис, он будет запрошен через Resource Manager
             else:
                 # Для других случаев используем стандартную логику восстановления
-                await process_manager_service.restore_previous_service()
+                elapsed = time.monotonic() - restore_start
+                _log_with_time("info", f"🔄 Восстановление предыдущего сервиса после {released_service.value}...", elapsed)
+                try:
+                    await process_manager_service.restore_previous_service()
+                    elapsed = time.monotonic() - restore_start
+                    _log_with_time("info", "✅ Предыдущий сервис восстановлен", elapsed)
+                except Exception as restore_error:
+                    elapsed = time.monotonic() - restore_start
+                    _log_with_time("warning", f"⚠️ Ошибка при восстановлении предыдущего сервиса: {restore_error}", elapsed)
+                    logger.exception("Детали ошибки восстановления:")
         except Exception as e:
-            logger.debug(f"Ошибка восстановления процесса (не критично): {e}")
+            elapsed = time.monotonic() - restore_start
+            _log_with_time("error", f"❌ Критическая ошибка восстановления процесса: {e}", elapsed)
+            logger.exception("Детали критической ошибки:")
     
     async def _wait_for_service_availability(self, service_type: ServiceType, timeout: int) -> bool:
         """
